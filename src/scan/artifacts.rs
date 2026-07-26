@@ -251,7 +251,7 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         let cand = Candidate::new(
             Category::Artifacts,
             rule.dir.clone(),
-            format!("{project}/{}", &rule.dir),
+            format!("{project}/{}", rule.dir),
             detail,
             size,
             Into::into(rule.risk),
