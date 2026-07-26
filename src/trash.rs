@@ -28,6 +28,22 @@ fn mount_point(path: &Path) -> io::Result<PathBuf> {
     Ok(best)
 }
 
+/// Device id of `path`, or of its nearest ancestor that exists.
+///
+/// A trash directory is routinely absent on a fresh machine, and its parents
+/// may be too. Checking only the path itself would wrongly conclude it lives on
+/// another filesystem and fall back to a location no user can write to.
+fn existing_dev(path: &Path) -> Option<u64> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if let Ok(m) = fs::metadata(p) {
+            return Some(m.dev());
+        }
+        cur = p.parent();
+    }
+    None
+}
+
 fn uid() -> u32 {
     crate::scan::home_dir()
         .and_then(|h| fs::metadata(h).ok())
@@ -44,9 +60,8 @@ pub fn trash_dir_for(path: &Path) -> io::Result<PathBuf> {
 
     if let Some(home) = crate::scan::home_dir() {
         let home_trash = home.join(".Trash");
-        if let Ok(m) = fs::metadata(&home_trash)
-            && m.dev() == dev
-        {
+        if existing_dev(&home_trash) == Some(dev) {
+            fs::create_dir_all(&home_trash)?;
             return Ok(home_trash);
         }
     }
@@ -67,25 +82,18 @@ pub fn trash_dir_for(path: &Path) -> io::Result<PathBuf> {
         .or_else(|| crate::scan::home_dir().map(|h| h.join(".local/share")))
         .map(|d| d.join("Trash"));
 
-    if let Some(base) = home_trash {
+    if let Some(base) = home_trash
+        && existing_dev(&base) == Some(dev)
+    {
         let files = base.join("files");
-        // Compare against the parent, which exists even when the trash does not.
-        let probe = if files.exists() {
-            files.clone()
-        } else {
-            base.clone()
-        };
-        let same_fs = fs::metadata(&probe)
-            .or_else(|_| fs::metadata(probe.parent().unwrap_or(&probe)))
-            .map(|m| m.dev() == dev)
-            .unwrap_or(false);
-        if same_fs {
-            fs::create_dir_all(&files)?;
-            fs::create_dir_all(base.join("info"))?;
-            return Ok(files);
-        }
+        fs::create_dir_all(&files)?;
+        fs::create_dir_all(base.join("info"))?;
+        return Ok(files);
     }
 
+    // Another filesystem: the trash lives at that mount's root. Creating it can
+    // legitimately fail on a read-only or root-owned mount, and the caller
+    // reports that rather than silently deleting instead.
     let base = mount_point(path)?.join(format!(".Trash-{}", uid()));
     let files = base.join("files");
     fs::create_dir_all(&files)?;
@@ -234,6 +242,39 @@ mod tests {
         assert!(dest.join("artifact.bin").exists(), "contents must survive");
 
         fs::remove_dir_all(&dest).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The freedesktop spec requires a sidecar recording where a file came
+    /// from; without it a file manager cannot offer "Put Back".
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn records_the_original_location_for_restore() {
+        let dir = std::env::temp_dir().join(format!("reap-trashinfo-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(format!("reap-info-{}", std::process::id()));
+        fs::create_dir_all(&target).unwrap();
+
+        let dest = move_to_trash(&target).expect("move to trash");
+        let name = dest.file_name().unwrap().to_string_lossy().into_owned();
+        let info = dest
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("info")
+            .join(format!("{name}.trashinfo"));
+
+        let body = fs::read_to_string(&info).expect("a .trashinfo sidecar");
+        assert!(body.starts_with("[Trash Info]"), "bad header: {body}");
+        assert!(
+            body.contains(&format!("Path={}", target.display())),
+            "original path missing from {body}"
+        );
+        assert!(body.contains("DeletionDate="), "no deletion date: {body}");
+
+        fs::remove_dir_all(&dest).ok();
+        fs::remove_file(&info).ok();
         fs::remove_dir_all(&dir).ok();
     }
 
