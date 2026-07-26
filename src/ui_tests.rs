@@ -13,6 +13,7 @@ use std::path::PathBuf;
 /// An app with a fixed set of candidates and no scanners running.
 fn fixture() -> App {
     let opts = ScanOpts {
+        rules: std::sync::Arc::new(crate::scan::Rules::default()),
         cache: std::sync::Arc::new(crate::cache::SizeCache::load(false)),
         roots: vec![],
         stale_days: 30,
@@ -21,7 +22,13 @@ fn fixture() -> App {
         skip_docker: true,
         skip_caches: true,
     };
-    let mut app = App::new(opts, false, false);
+    let mut app = App::new(
+        opts,
+        false,
+        false,
+        Default::default(),
+        PathBuf::from("/dev/null"),
+    );
     app.pending.clear();
     app.items = vec![
         Candidate::new(
@@ -106,8 +113,14 @@ fn the_default_view_spans_every_category() {
     assert_eq!(app.selected_count(), 3);
 
     let out = draw(&mut app, 110, 30);
-    assert!(out.contains("3 selected"), "footer selection missing:\n{out}");
-    assert!(out.contains("frees 17.4 GB"), "footer total missing:\n{out}");
+    assert!(
+        out.contains("3 selected"),
+        "footer selection missing:\n{out}"
+    );
+    assert!(
+        out.contains("frees 17.4 GB"),
+        "footer total missing:\n{out}"
+    );
 }
 
 #[test]
@@ -116,7 +129,10 @@ fn header_breaks_the_total_down_by_risk() {
     let out = draw(&mut app, 110, 30);
     // 17 GB safe, 420 MB rebuildable, and a zero-byte irreversible stash.
     assert!(out.contains("17.0 GB safe"), "risk split missing:\n{out}");
-    assert!(out.contains("420 MB rebuildable"), "risk split missing:\n{out}");
+    assert!(
+        out.contains("420 MB rebuildable"),
+        "risk split missing:\n{out}"
+    );
     assert!(out.contains("irreversible"), "risk split missing:\n{out}");
 }
 
@@ -178,6 +194,7 @@ fn survives_a_terminal_far_too_small_to_draw() {
 #[test]
 fn empty_state_renders_without_items() {
     let opts = ScanOpts {
+        rules: std::sync::Arc::new(crate::scan::Rules::default()),
         cache: std::sync::Arc::new(crate::cache::SizeCache::load(false)),
         roots: vec![],
         stale_days: 30,
@@ -186,7 +203,13 @@ fn empty_state_renders_without_items() {
         skip_docker: true,
         skip_caches: true,
     };
-    let mut app = App::new(opts, true, false);
+    let mut app = App::new(
+        opts,
+        true,
+        false,
+        Default::default(),
+        PathBuf::from("/dev/null"),
+    );
     app.pending.clear();
     app.items.clear();
     app.rebuild();

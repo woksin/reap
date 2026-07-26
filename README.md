@@ -6,7 +6,8 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![ratatui](https://img.shields.io/badge/tui-ratatui%200.30-7dd3fc)](https://ratatui.rs)
-[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple)](#)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#platforms)
+[![CI](https://github.com/woksin/reap/actions/workflows/ci.yml/badge.svg)](https://github.com/woksin/reap/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
 Git branches · worktrees · build artifacts · Docker · package manager caches
@@ -51,9 +52,17 @@ work. Those look identical to `git branch --merged`. reap tells them apart.
 ## Install
 
 ```bash
+cargo install --git https://github.com/woksin/reap
+```
+
+Or from a checkout:
+
+```bash
 git clone https://github.com/woksin/reap && cd reap
 cargo install --path .
 ```
+
+Needs Rust 1.88+. `git` and `docker` are used if present and skipped if not.
 
 ## Use
 
@@ -67,6 +76,8 @@ reap --stale-days 90      # only call things stale after 90 days
 reap --min-size 100MB     # hide the small fry
 reap --no-docker          # skip the Docker scan
 reap --no-cache           # re-measure everything instead of reusing sizes
+reap --ignore '*/vendor'  # skip anything matching, without editing the config
+reap --write-config       # write a documented starter config
 ```
 
 With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
@@ -229,6 +240,80 @@ also states what free space **actually** did, read from the filesystem before an
 The two differ when items were trashed, when something failed, or when sizes drifted
 since the scan.
 
+
+## Configuration
+
+Nothing reap knows is baked in. Which directories count as build output, which
+caches are worth offering, what never to descend into — all of it comes from
+`~/.config/reap/config.toml` (or `$XDG_CONFIG_HOME`), seeded with the built-in
+defaults.
+
+```bash
+reap --write-config     # documented starter file
+```
+
+Command-line flags override the config, which overrides the defaults.
+
+### Ignoring things
+
+Patterns match against a candidate's **path**, its **label**, and its
+**`category/group`**. `*` matches any run of characters, and a pattern with no
+wildcard also matches everything beneath it.
+
+```toml
+ignore = [
+  "~/.nuget/packages",       # one cache, always
+  "*/vendor",                # any vendor directory, anywhere
+  "git/unpushed branches",   # a whole group
+  "docker/unused volumes",
+]
+```
+
+Pressing `x` on a candidate appends the right pattern and writes the file — a
+path when there is one, so the rule survives a rename, otherwise the group.
+
+### Adding rules
+
+```toml
+[[artifact]]
+dir = "my-build-output"
+evidence = ["Makefile"]       # sibling files proving what it is
+regen = "make"
+risk = "rebuildable"          # safe | rebuildable | irreversible
+
+[[cache]]
+path = "~/.cache/my-tool"
+label = "my-tool cache"
+detail = "re-downloaded on next run"
+risk = "safe"
+prune = ["my-tool", "cache", "clean"]   # run this instead of deleting
+```
+
+`evidence` is what keeps the artifact rules honest — without it, any directory
+sharing the name would match. These entries **add** to the built-ins; set
+`replace_builtin_artifacts` or `replace_builtin_caches` to use only your own.
+
+> [!NOTE]
+> A malformed config is a fatal error, not a warning. Silently falling back to
+> defaults would quietly change which files this tool offers to delete.
+
+## Platforms
+
+macOS and Linux, tested on both in CI.
+
+Rules naming a path a machine does not have simply do not apply, so one rule set
+covers both — the Xcode entries are inert on Linux, the `~/.cache/*` ones on
+macOS. The pieces that genuinely differ:
+
+| | macOS | Linux |
+|---|---|---|
+| Trash | `~/.Trash`, `<mount>/.Trashes/<uid>` | freedesktop `Trash/files` + `.trashinfo`, `<mount>/.Trash-<uid>` |
+| Unnamed caches | `~/Library/Caches` | `$XDG_CACHE_HOME`, else `~/.cache` |
+| `i` reveals via | Finder | `xdg-open` |
+
+Windows is not supported — the tool leans on `df`, POSIX device ids and unix
+trash layouts throughout.
+
 ## Keys
 
 | Key | |
@@ -246,6 +331,7 @@ since the scan.
 | `f` | cycle risk filter: all, safe, rebuildable, irreversible |
 | `/` | filter by text |
 | `i` | reveal the highlighted path in Finder |
+| `x` | never offer this again — appends to your config |
 | `d` | reap the selection |
 | `r` | rescan |
 | `esc` | clear the filter, then the selection |

@@ -89,9 +89,7 @@ fn parse_size(s: &str) -> u64 {
     if s.is_empty() || s == "N/A" {
         return 0;
     }
-    let split = s
-        .find(|c: char| c.is_ascii_alphabetic())
-        .unwrap_or(s.len());
+    let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
     let Ok(num) = num.trim().parse::<f64>() else {
         return 0;
@@ -335,7 +333,14 @@ fn build_cache(df: &Df, tx: &Sender<ScanEvent>) {
 
 fn networks(tx: &Sender<ScanEvent>) {
     let Ok(out) = Command::new("docker")
-        .args(["network", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"])
+        .args([
+            "network",
+            "ls",
+            "--filter",
+            "dangling=true",
+            "--format",
+            "{{.Name}}",
+        ])
         .output()
     else {
         return;

@@ -91,6 +91,10 @@ pub struct App {
     /// Free and total bytes on the volume we were launched from.
     pub disk: Option<(u64, u64)>,
 
+    /// The user's configuration, and where it lives, so `x` can persist.
+    pub config: crate::config::Config,
+    pub config_path: std::path::PathBuf,
+
     pub opts: ScanOpts,
     scan_rx: Option<Receiver<ScanEvent>>,
     reap_rx: Option<Receiver<ReapEvent>>,
@@ -98,7 +102,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(opts: ScanOpts, dry_run: bool, trash: bool) -> Self {
+    pub fn new(
+        opts: ScanOpts,
+        dry_run: bool,
+        trash: bool,
+        config: crate::config::Config,
+        config_path: std::path::PathBuf,
+    ) -> Self {
         let mut app = Self {
             items: Vec::new(),
             nodes: Vec::new(),
@@ -125,6 +135,8 @@ impl App {
             disk: std::env::current_dir()
                 .ok()
                 .and_then(|d| crate::util::disk_free(&d)),
+            config,
+            config_path,
             opts,
             scan_rx: None,
             reap_rx: None,
@@ -469,7 +481,18 @@ impl App {
         match &self.items[i].action {
             crate::model::Action::Remove(path) => {
                 let shown = crate::util::tilde(path);
-                match std::process::Command::new("open").arg("-R").arg(path).spawn() {
+                // Finder can select the entry itself; xdg-open only opens a
+                // directory, so it gets the parent.
+                let (program, args): (&str, Vec<std::ffi::OsString>) = if cfg!(target_os = "macos")
+                {
+                    ("open", vec!["-R".into(), path.into()])
+                } else {
+                    (
+                        "xdg-open",
+                        vec![path.parent().unwrap_or(path).as_os_str().to_owned()],
+                    )
+                };
+                match std::process::Command::new(program).args(args).spawn() {
                     Ok(_) => self.status = format!("revealed {shown}"),
                     Err(e) => self.status = format!("could not reveal {shown}: {e}"),
                 }
@@ -477,6 +500,43 @@ impl App {
             // Nothing on disk to point at for a command candidate.
             crate::model::Action::Run { .. } => {
                 self.status = self.items[i].action.describe();
+            }
+        }
+    }
+
+    /// Add the highlighted candidate to the persistent ignore list.
+    ///
+    /// Prefers the path when there is one, so the rule survives the item being
+    /// renamed; otherwise falls back to `category/group`, which ignores the
+    /// whole class rather than one transient entry.
+    pub fn ignore_current(&mut self) {
+        let Some(&i) = self.visible.get(self.item_idx) else {
+            return;
+        };
+        let pattern = match &self.items[i].action {
+            crate::model::Action::Remove(path) => crate::util::tilde(path),
+            crate::model::Action::Run { .. } => format!(
+                "{}/{}",
+                self.items[i].category.title().to_lowercase(),
+                self.items[i].group
+            ),
+        };
+
+        if !self.config.add_ignore(pattern.clone()) {
+            self.status = format!("already ignored: {pattern}");
+            return;
+        }
+        match self.config.save(&self.config_path) {
+            Ok(()) => {
+                self.status = format!("ignoring {pattern}");
+                // Apply immediately rather than waiting for the next scan.
+                let ignore = crate::config::IgnoreSet::new(&self.config.ignore);
+                self.items.retain(|c| !ignore.matches_candidate(c));
+                self.rebuild();
+            }
+            Err(e) => {
+                self.config.ignore.retain(|p| p != &pattern);
+                self.status = format!("could not write {}: {e}", self.config_path.display());
             }
         }
     }
@@ -498,7 +558,6 @@ impl App {
         let after = self.disk_after?;
         Some(after.saturating_sub(before))
     }
-
 
     pub fn begin_confirm(&mut self) {
         if self.selected_count() == 0 {

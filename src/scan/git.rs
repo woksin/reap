@@ -33,14 +33,16 @@ pub fn scan(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         branches(repo, &name, opts, tx);
         worktrees(repo, &name, opts, tx);
         stashes(repo, &name, opts, tx);
-        housekeeping(repo, &name, tx);
+        housekeeping(repo, &name, opts, tx);
     });
 }
 
 /// The branch everything else is measured against.
 fn default_branch(repo: &Path) -> String {
-    if let Some(head) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        && let Some(b) = head.trim().strip_prefix("origin/")
+    if let Some(head) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) && let Some(b) = head.trim().strip_prefix("origin/")
         && !b.is_empty()
     {
         return b.to_string();
@@ -63,8 +65,16 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
 
     // Compare against the remote tip when we have one — a local default branch
     // that has drifted behind origin would under-report merged work.
-    let merge_base = if git(repo, &["rev-parse", "--verify", "--quiet", &format!("origin/{default}")])
-        .is_some()
+    let merge_base = if git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("origin/{default}"),
+        ],
+    )
+    .is_some()
     {
         format!("origin/{default}")
     } else {
@@ -73,7 +83,12 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
 
     let merged: Vec<String> = git(
         repo,
-        &["branch", "--merged", &merge_base, "--format=%(refname:short)"],
+        &[
+            "branch",
+            "--merged",
+            &merge_base,
+            "--format=%(refname:short)",
+        ],
     )
     .unwrap_or_default()
     .lines()
@@ -138,7 +153,9 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
             ),
             Survives::OnRemote { commits, remote } => (
                 "pushed branches",
-                format!("{commits} unmerged commits, all pushed to {remote} — recoverable from the remote"),
+                format!(
+                    "{commits} unmerged commits, all pushed to {remote} — recoverable from the remote"
+                ),
                 Risk::Caution,
                 true,
             ),
@@ -173,7 +190,7 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
             },
         )
         .with_age(Some(age));
-        let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+        super::emit(tx, opts, cand);
     }
 }
 
@@ -239,13 +256,22 @@ fn survives(repo: &Path, branch: &str, merge_base: &str, is_merged: bool) -> Sur
     // Commits on this branch that no remote-tracking ref can reach.
     let unpushed = rev_count(repo, &["rev-list", "--count", branch, "--not", "--remotes"]);
     if unpushed == 0 {
-        let remote = git(repo, &["branch", "-r", "--contains", branch, "--format=%(refname:short)"])
-            .unwrap_or_default()
-            .lines()
-            .next()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "a remote".into());
+        let remote = git(
+            repo,
+            &[
+                "branch",
+                "-r",
+                "--contains",
+                branch,
+                "--format=%(refname:short)",
+            ],
+        )
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "a remote".into());
         return Survives::OnRemote {
             commits: ahead,
             remote,
@@ -329,7 +355,7 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
                     cwd: Some(repo.to_path_buf()),
                 },
             );
-            let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+            super::emit(tx, opts, cand);
             continue;
         }
 
@@ -347,7 +373,10 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
         let unpushed = match &wt.branch {
             Some(b) => rev_count(repo, &["rev-list", "--count", b, "--not", "--remotes"]),
             // A detached HEAD is unreachable from any ref once the worktree goes.
-            None => rev_count(&wt.path, &["rev-list", "--count", "HEAD", "--not", "--remotes"]),
+            None => rev_count(
+                &wt.path,
+                &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+            ),
         };
 
         let (risk, detail) = match (dirty, unpushed) {
@@ -388,7 +417,7 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
             },
         )
         .with_age(Some(age));
-        let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+        super::emit(tx, opts, cand);
     }
 }
 
@@ -424,12 +453,12 @@ fn stashes(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>
             },
         )
         .with_age(Some(age));
-        let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+        super::emit(tx, opts, cand);
     }
 }
 
 /// Loose objects and cruft that `git gc` would compact away.
-fn housekeeping(repo: &Path, repo_name: &str, tx: &Sender<ScanEvent>) {
+fn housekeeping(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     let Some(out) = git(repo, &["count-objects", "-v"]) else {
         return;
     };
@@ -470,5 +499,5 @@ fn housekeeping(repo: &Path, repo_name: &str, tx: &Sender<ScanEvent>) {
             cwd: Some(repo.to_path_buf()),
         },
     );
-    let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+    super::emit(tx, opts, cand);
 }

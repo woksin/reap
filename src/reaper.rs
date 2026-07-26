@@ -24,7 +24,21 @@ fn is_forbidden(path: &Path) -> bool {
     }
     matches!(
         path.to_str().unwrap_or(""),
-        "/" | "/usr" | "/etc" | "/var" | "/bin" | "/sbin" | "/opt" | "/System" | "/Library" | "/Applications"
+        "/" | "/usr"
+            | "/etc"
+            | "/var"
+            | "/bin"
+            | "/sbin"
+            | "/opt"
+            | "/boot"
+            | "/proc"
+            | "/sys"
+            | "/home"
+            | "/root"
+            | "/srv"
+            | "/System"
+            | "/Library"
+            | "/Applications"
     )
 }
 
@@ -237,12 +251,18 @@ pub fn empty_trashed(paths: &[PathBuf]) -> usize {
         .par_iter()
         .filter(|p| {
             // Guard against ever being handed something outside a trash.
+            // Covers macOS (`.Trash`, `.Trashes`) and freedesktop
+            // (`Trash`, `.Trash-1000`).
             p.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
-                s == ".Trash" || s == ".Trashes"
+                s == "Trash" || s == ".Trash" || s == ".Trashes" || s.starts_with(".Trash-")
             })
         })
-        .filter(|p| std::fs::remove_dir_all(p).or_else(|_| std::fs::remove_file(p)).is_ok())
+        .filter(|p| {
+            std::fs::remove_dir_all(p)
+                .or_else(|_| std::fs::remove_file(p))
+                .is_ok()
+        })
         .count()
 }
 
@@ -297,7 +317,9 @@ mod tests {
 
     #[test]
     fn allows_a_normal_nested_target() {
-        assert!(!is_forbidden(Path::new("/Users/someone/code/app/node_modules")));
+        assert!(!is_forbidden(Path::new(
+            "/Users/someone/code/app/node_modules"
+        )));
     }
 
     #[test]
@@ -417,7 +439,10 @@ mod tests {
             plain(false),
         );
         assert!(out[0].ok, "a path already gone is not a failure");
-        assert_eq!(out[0].freed, 0, "it frees nothing, so it must not be counted");
+        assert_eq!(
+            out[0].freed, 0,
+            "it frees nothing, so it must not be counted"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -473,7 +498,10 @@ mod tests {
             stash_index(&["stash".into(), "drop".into(), "stash@{7}".into()]),
             Some(7)
         );
-        assert_eq!(stash_index(&["branch".into(), "-d".into(), "x".into()]), None);
+        assert_eq!(
+            stash_index(&["branch".into(), "-d".into(), "x".into()]),
+            None
+        );
         assert_eq!(stash_index(&["stash".into(), "list".into()]), None);
         assert_eq!(
             stash_index(&["stash".into(), "drop".into(), "refs/stash".into()]),

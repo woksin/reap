@@ -119,8 +119,7 @@ impl SizeCache {
             return;
         };
         // Entries for directories that no longer exist would grow without bound.
-        let live: HashMap<&PathBuf, &Entry> =
-            entries.iter().filter(|(p, _)| p.exists()).collect();
+        let live: HashMap<&PathBuf, &Entry> = entries.iter().filter(|(p, _)| p.exists()).collect();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -155,7 +154,11 @@ mod tests {
         // Rewrite the file's contents without touching the directory entry:
         // the cached figure is deliberately kept.
         std::fs::write(target.join("a.bin"), vec![0u8; 8192]).unwrap();
-        assert_eq!(cache.size_of(&target), first, "entry should still be reused");
+        assert_eq!(
+            cache.size_of(&target),
+            first,
+            "entry should still be reused"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -124,10 +124,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect, tick: u64) {
 
     let mut left = vec![
         Span::raw(" "),
-        Span::styled(
-            "reap",
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("reap", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled("  ", Style::new()),
     ];
     if app.scanning() {
@@ -178,7 +175,9 @@ fn render_header(f: &mut Frame, app: &App, area: Rect, tick: u64) {
         ));
         split.push(Span::styled(
             human(size),
-            Style::new().fg(risk_color(risk)).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(risk_color(risk))
+                .add_modifier(Modifier::BOLD),
         ));
         split.push(Span::styled(
             format!(" {}   ", risk.label()),
@@ -232,10 +231,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
                             "Everything",
                             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!(" ({})", app.items.len()),
-                            Style::new().fg(DIM),
-                        ),
+                        Span::styled(format!(" ({})", app.items.len()), Style::new().fg(DIM)),
                     ],
                     vec![Span::styled(
                         format!("{} ", human(app.total_size())),
@@ -253,7 +249,11 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
             }
             Node::Category(cat) => {
                 let size = app.category_size(*cat);
-                let arrow = if app.expanded.contains(cat) { "▾" } else { "▸" };
+                let arrow = if app.expanded.contains(cat) {
+                    "▾"
+                } else {
+                    "▸"
+                };
                 let color = category_color(*cat);
                 let head = justify(
                     vec![
@@ -267,7 +267,10 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
                             Style::new().fg(DIM),
                         ),
                     ],
-                    vec![Span::styled(format!("{} ", human(size)), Style::new().fg(color))],
+                    vec![Span::styled(
+                        format!("{} ", human(size)),
+                        Style::new().fg(color),
+                    )],
                     width,
                 );
 
@@ -294,7 +297,10 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled(group.clone(), Style::new().fg(Color::Rgb(200, 205, 215))),
                         Span::styled(format!(" ({count})"), Style::new().fg(DIM)),
                     ],
-                    vec![Span::styled(format!("{} ", human(size)), Style::new().fg(DIM))],
+                    vec![Span::styled(
+                        format!("{} ", human(size)),
+                        Style::new().fg(DIM),
+                    )],
                     width,
                 );
                 ListItem::new(line)
@@ -471,10 +477,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             "? help".to_string()
         }
     };
-    let right = vec![
-        Span::styled(hints, Style::new().fg(DIM)),
-        Span::raw(" "),
-    ];
+    let right = vec![Span::styled(hints, Style::new().fg(DIM)), Span::raw(" ")];
 
     f.render_widget(
         Paragraph::new(justify(left, right, inner)).block(
@@ -497,7 +500,10 @@ fn render_confirm(f: &mut Frame, app: &App) {
                 format!("{}", app.reap_total()),
                 Style::new().fg(SELECTED).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" items · frees ", Style::new().fg(Color::Rgb(230, 237, 243))),
+            Span::styled(
+                " items · frees ",
+                Style::new().fg(Color::Rgb(230, 237, 243)),
+            ),
             Span::styled(
                 human(app.selected_size()),
                 Style::new().fg(SAFE).add_modifier(Modifier::BOLD),
@@ -513,7 +519,10 @@ fn render_confirm(f: &mut Frame, app: &App) {
         }
         let size: u64 = matching.iter().map(|i| i.size).sum();
         lines.push(Line::from(vec![
-            Span::styled(format!("    {} ", risk.dot()), Style::new().fg(risk_color(risk))),
+            Span::styled(
+                format!("    {} ", risk.dot()),
+                Style::new().fg(risk_color(risk)),
+            ),
             Span::styled(
                 format!("{:<14}", risk.label()),
                 Style::new().fg(risk_color(risk)),
@@ -576,7 +585,9 @@ fn render_confirm(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled(
             "  enter ",
-            Style::new().fg(if ready { SAFE } else { DIM }).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(if ready { SAFE } else { DIM })
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             if ready { "confirm" } else { "confirm (locked)" },
@@ -644,7 +655,10 @@ fn render_reaping(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!("  {}", truncate(&current, (inner.width as usize).saturating_sub(4))),
+                format!(
+                    "  {}",
+                    truncate(&current, (inner.width as usize).saturating_sub(4))
+                ),
                 Style::new().fg(DIM),
             )),
             Line::from(vec![
@@ -684,10 +698,7 @@ fn render_report(f: &mut Frame, app: &App) {
                 human(app.freed),
                 Style::new().fg(SAFE).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  ·  {ok_count} succeeded"),
-                Style::new().fg(DIM),
-            ),
+            Span::styled(format!("  ·  {ok_count} succeeded"), Style::new().fg(DIM)),
             Span::styled(
                 if failures.is_empty() {
                     String::new()
@@ -731,7 +742,10 @@ fn render_report(f: &mut Frame, app: &App) {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::new()),
             Span::styled(
-                format!("{} items are recoverable from the Trash.", app.trashed.len()),
+                format!(
+                    "{} items are recoverable from the Trash.",
+                    app.trashed.len()
+                ),
                 Style::new().fg(SELECTED),
             ),
         ]));
@@ -762,9 +776,15 @@ fn render_report(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled("  r ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
         Span::styled("rescan", Style::new().fg(DIM)),
-        Span::styled("   esc ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "   esc ",
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("back", Style::new().fg(DIM)),
-        Span::styled("   q ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "   q ",
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("quit", Style::new().fg(DIM)),
     ]));
 
@@ -791,10 +811,15 @@ const KEYS: &[(&str, &str)] = &[
     ("a", "select everything in view"),
     ("s", "select all except irreversible"),
     ("n", "clear the whole selection"),
+    ("v", "start a range, v again to select to the cursor"),
     ("o", "cycle sort: size, age, name"),
+    ("f", "cycle risk filter"),
     ("/", "filter by text"),
+    ("i", "reveal the path in the file manager"),
+    ("x", "never offer this again (writes the config)"),
     ("d", "reap the selection"),
     ("r", "rescan"),
+    ("esc", "clear the filter, then the selection"),
     ("?", "this help"),
     ("q", "quit"),
 ];

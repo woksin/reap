@@ -28,7 +28,17 @@ fn mount_point(path: &Path) -> io::Result<PathBuf> {
     Ok(best)
 }
 
+fn uid() -> u32 {
+    crate::scan::home_dir()
+        .and_then(|h| fs::metadata(h).ok())
+        .map(|m| m.uid())
+        .unwrap_or(0)
+}
+
 /// The trash directory that `path` can be renamed into.
+///
+/// macOS: `~/.Trash`, or `<mount>/.Trashes/<uid>` on any other volume.
+#[cfg(target_os = "macos")]
 pub fn trash_dir_for(path: &Path) -> io::Result<PathBuf> {
     let dev = fs::symlink_metadata(path)?.dev();
 
@@ -41,14 +51,114 @@ pub fn trash_dir_for(path: &Path) -> io::Result<PathBuf> {
         }
     }
 
-    // Any other volume keeps a per-user trash at its root.
-    let uid = crate::scan::home_dir()
-        .and_then(|h| fs::metadata(h).ok())
-        .map(|m| m.uid())
-        .unwrap_or(0);
-    let dir = mount_point(path)?.join(".Trashes").join(uid.to_string());
+    let dir = mount_point(path)?.join(".Trashes").join(uid().to_string());
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Freedesktop trash: `$XDG_DATA_HOME/Trash/files`, or `<mount>/.Trash-<uid>/files`
+/// on another filesystem.
+#[cfg(not(target_os = "macos"))]
+pub fn trash_dir_for(path: &Path) -> io::Result<PathBuf> {
+    let dev = fs::symlink_metadata(path)?.dev();
+
+    let home_trash = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| crate::scan::home_dir().map(|h| h.join(".local/share")))
+        .map(|d| d.join("Trash"));
+
+    if let Some(base) = home_trash {
+        let files = base.join("files");
+        // Compare against the parent, which exists even when the trash does not.
+        let probe = if files.exists() {
+            files.clone()
+        } else {
+            base.clone()
+        };
+        let same_fs = fs::metadata(&probe)
+            .or_else(|_| fs::metadata(probe.parent().unwrap_or(&probe)))
+            .map(|m| m.dev() == dev)
+            .unwrap_or(false);
+        if same_fs {
+            fs::create_dir_all(&files)?;
+            fs::create_dir_all(base.join("info"))?;
+            return Ok(files);
+        }
+    }
+
+    let base = mount_point(path)?.join(format!(".Trash-{}", uid()));
+    let files = base.join("files");
+    fs::create_dir_all(&files)?;
+    fs::create_dir_all(base.join("info"))?;
+    Ok(files)
+}
+
+/// Record the original location so a desktop file manager can restore it.
+#[cfg(not(target_os = "macos"))]
+fn write_trashinfo(files_dir: &Path, name: &str, original: &Path) {
+    let Some(base) = files_dir.parent() else {
+        return;
+    };
+    let info = base.join("info").join(format!("{name}.trashinfo"));
+    // Percent-encode the few characters the spec requires.
+    let mut encoded = String::new();
+    for byte in original.to_string_lossy().bytes() {
+        match byte {
+            b'/' | b'-' | b'_' | b'.' | b'~' => encoded.push(byte as char),
+            b if b.is_ascii_alphanumeric() => encoded.push(b as char),
+            b => encoded.push_str(&format!("%{b:02X}")),
+        }
+    }
+    let body = format!(
+        "[Trash Info]\nPath={encoded}\nDeletionDate={}\n",
+        now_iso8601()
+    );
+    let _ = fs::write(info, body);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn now_iso8601() -> String {
+    // Days-since-epoch to a civil date, so no date crate is needed for one field.
+    let secs = crate::util::now_secs();
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (mut y, mut d) = (1970i64, days as i64);
+    loop {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let len = if leap { 366 } else { 365 };
+        if d < len {
+            break;
+        }
+        d -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0;
+    while m < 12 && d >= months[m] {
+        d -= months[m];
+        m += 1;
+    }
+    format!(
+        "{y:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        m + 1,
+        d + 1,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 /// Move `path` into its volume's trash, returning where it landed.
@@ -78,6 +188,16 @@ pub fn move_to_trash(path: &Path) -> io::Result<PathBuf> {
     }
 
     fs::rename(path, &dest)?;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let final_name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(name);
+        write_trashinfo(&dir, &final_name, path);
+    }
+
     Ok(dest)
 }
 
@@ -129,7 +249,10 @@ mod tests {
             fs::create_dir_all(&target).unwrap();
             dests.push(move_to_trash(&target).expect("move to trash"));
         }
-        assert_ne!(dests[0], dests[1], "second entry must not overwrite the first");
+        assert_ne!(
+            dests[0], dests[1],
+            "second entry must not overwrite the first"
+        );
 
         for d in dests {
             fs::remove_dir_all(&d).ok();

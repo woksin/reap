@@ -25,7 +25,6 @@ impl Category {
             Category::Caches => "Caches",
         }
     }
-
 }
 
 /// How dangerous it is to delete a candidate.

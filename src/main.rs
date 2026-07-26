@@ -1,5 +1,6 @@
 mod app;
 mod cache;
+mod config;
 mod model;
 mod reaper;
 mod scan;
@@ -28,17 +29,17 @@ struct Cli {
     #[arg(short, long = "path", value_name = "DIR")]
     paths: Vec<PathBuf>,
 
-    /// How long something must sit untouched before it counts as stale.
-    #[arg(long, default_value_t = 30, value_name = "DAYS")]
-    stale_days: u64,
+    /// How long something must sit untouched before it counts as stale. [30]
+    #[arg(long, value_name = "DAYS")]
+    stale_days: Option<u64>,
 
-    /// Ignore anything smaller than this, e.g. 50MB.
-    #[arg(long, default_value = "1MB", value_name = "SIZE")]
-    min_size: String,
+    /// Ignore anything smaller than this, e.g. 50MB. [1MB]
+    #[arg(long, value_name = "SIZE")]
+    min_size: Option<String>,
 
-    /// How deep to descend from each scan root.
-    #[arg(long, default_value_t = 8, value_name = "N")]
-    depth: usize,
+    /// How deep to descend from each scan root. [8]
+    #[arg(long, value_name = "N")]
+    depth: Option<usize>,
 
     /// Show what would be removed without touching anything.
     #[arg(long)]
@@ -64,9 +65,28 @@ struct Cli {
     /// Re-measure every directory instead of reusing cached sizes.
     #[arg(long)]
     no_cache: bool,
+
+    /// Configuration file. Defaults to $XDG_CONFIG_HOME/reap/config.toml,
+    /// or ~/.config/reap/config.toml.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Write a documented starter configuration and exit.
+    #[arg(long)]
+    write_config: bool,
+
+    /// Never offer candidates matching this pattern. Repeatable, and added to
+    /// whatever the configuration file already lists.
+    #[arg(long = "ignore", value_name = "PATTERN")]
+    ignores: Vec<String>,
 }
 
-fn parse_size(s: &str) -> u64 {
+/// CLI arguments win over the configuration file, which wins over the defaults.
+fn resolve<T>(flag: Option<T>, configured: Option<T>, default: T) -> T {
+    flag.or(configured).unwrap_or(default)
+}
+
+pub fn parse_size(s: &str) -> u64 {
     let s = s.trim();
     let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
@@ -91,21 +111,55 @@ fn parse_size(s: &str) -> u64 {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let roots = if cli.paths.is_empty() {
-        scan::default_roots()
+    let config_path = cli
+        .config
+        .clone()
+        .or_else(config::default_path)
+        .unwrap_or_else(|| PathBuf::from("reap.toml"));
+
+    if cli.write_config {
+        if config_path.exists() {
+            anyhow::bail!(
+                "{} already exists — delete it first, or pass --config to write elsewhere",
+                config_path.display()
+            );
+        }
+        config::Config::write_template(&config_path)?;
+        println!("Wrote {}", config_path.display());
+        return Ok(());
+    }
+
+    // A malformed config is fatal rather than ignored: silently falling back to
+    // defaults would change which files this tool offers to delete.
+    let mut cfg = config::Config::load(&config_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", config_path.display()))?;
+    cfg.ignore.extend(cli.ignores.iter().cloned());
+
+    let roots = if !cli.paths.is_empty() {
+        cli.paths.clone()
+    } else if !cfg.scan.roots.is_empty() {
+        cfg.scan.roots.iter().map(|r| config::expand(r)).collect()
     } else {
-        cli.paths.iter().filter(|p| p.is_dir()).cloned().collect()
+        scan::default_roots()
     };
+    let roots: Vec<PathBuf> = roots.into_iter().filter(|p| p.is_dir()).collect();
+
+    let min_size = cli
+        .min_size
+        .clone()
+        .or_else(|| cfg.scan.min_size.clone())
+        .unwrap_or_else(|| "1MB".to_string());
 
     let sizes = std::sync::Arc::new(cache::SizeCache::load(!cli.no_cache));
     let opts = ScanOpts {
+        rules: std::sync::Arc::new(scan::Rules::from_config(&cfg)),
         cache: sizes.clone(),
         roots,
-        stale_days: cli.stale_days,
-        min_size: parse_size(&cli.min_size),
-        max_depth: cli.depth,
-        skip_docker: cli.no_docker,
-        skip_caches: cli.no_caches,
+        stale_days: resolve(cli.stale_days, cfg.scan.stale_days, 30),
+        min_size: parse_size(&min_size),
+        max_depth: resolve(cli.depth, cfg.scan.depth, 8),
+        skip_docker: cli.no_docker || cfg.scan.docker == Some(false),
+        skip_caches: cli.no_caches || cfg.scan.caches == Some(false),
     };
 
     if cli.list {
@@ -114,8 +168,12 @@ fn main() -> Result<()> {
         return result;
     }
 
+    let trash = cli.trash || cfg.scan.trash == Some(true);
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, App::new(opts, cli.dry_run, cli.trash));
+    let result = run(
+        &mut terminal,
+        App::new(opts, cli.dry_run, trash, cfg, config_path),
+    );
     ratatui::restore();
     sizes.save();
     result
@@ -131,7 +189,12 @@ fn list_mode(opts: ScanOpts) -> Result<()> {
             continue;
         }
         let size: u64 = in_cat.iter().map(|i| i.size).sum();
-        println!("\n{} — {} ({} items)", cat.title(), human(size), in_cat.len());
+        println!(
+            "\n{} — {} ({} items)",
+            cat.title(),
+            human(size),
+            in_cat.len()
+        );
 
         // Group headings carry the reason something is reapable, which is the
         // part worth reading when there are hundreds of entries.
@@ -321,6 +384,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char('f') => app.cycle_risk_filter(),
             KeyCode::Char('v') => app.toggle_range(),
             KeyCode::Char('i') => app.inspect_current(),
+            KeyCode::Char('x') => app.ignore_current(),
             KeyCode::Char('d') => app.begin_confirm(),
             KeyCode::Char('r') => app.rescan(),
             _ => {}
