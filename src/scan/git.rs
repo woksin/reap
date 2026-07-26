@@ -1,6 +1,7 @@
 use super::ScanOpts;
 use crate::model::{Action, Candidate, Category, Risk, ScanEvent};
 use crate::util::{days_since, tilde};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
@@ -19,7 +20,10 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
 }
 
 pub fn scan(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
-    for repo in repos {
+    // Evaluating a repository means spawning a `git` process per branch, which
+    // is what dominates a scan. Repositories are independent, so they run
+    // concurrently rather than one after another.
+    repos.par_iter().for_each_with(tx.clone(), |tx, repo| {
         let name = repo
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -30,7 +34,7 @@ pub fn scan(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         worktrees(repo, &name, opts, tx);
         stashes(repo, &name, opts, tx);
         housekeeping(repo, &name, tx);
-    }
+    });
 }
 
 /// The branch everything else is measured against.
