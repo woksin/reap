@@ -84,6 +84,12 @@ pub struct ScanOpts {
     pub max_depth: usize,
     pub skip_docker: bool,
     pub skip_caches: bool,
+    /// Also look for stray build output sitting directly in `$HOME`.
+    ///
+    /// Worth doing when scanning the default roots, but surprising when the
+    /// user named the directories to look in — those are the only ones they
+    /// asked about.
+    pub scan_home_strays: bool,
 }
 
 impl Default for ScanOpts {
@@ -97,6 +103,7 @@ impl Default for ScanOpts {
             max_depth: 8,
             skip_docker: false,
             skip_caches: false,
+            scan_home_strays: true,
         }
     }
 }

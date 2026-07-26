@@ -4,6 +4,8 @@ mod config;
 mod model;
 mod reaper;
 mod scan;
+#[cfg(test)]
+mod specs;
 mod trash;
 mod ui;
 #[cfg(test)]
@@ -160,6 +162,7 @@ fn main() -> Result<()> {
         max_depth: resolve(cli.depth, cfg.scan.depth, 8),
         skip_docker: cli.no_docker || cfg.scan.docker == Some(false),
         skip_caches: cli.no_caches || cfg.scan.caches == Some(false),
+        scan_home_strays: cli.paths.is_empty() && cfg.scan.roots.is_empty(),
     };
 
     if cli.list {

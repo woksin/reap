@@ -396,13 +396,47 @@ disk.
 
 ```bash
 cargo test
+cargo test specs::                            # behavioural specifications only
 cargo test preview -- --ignored --nocapture   # print a rendered frame
 ```
 
-The UI is tested through ratatui's `TestBackend` against the real cell buffer, including
-terminals far too small to draw. The deletion paths are covered directly: refusing broad
-paths, dry-run leaving the disk alone, trashing keeping contents recoverable, emptying
-refusing anything outside a trash, and overlapping selections counting their bytes once.
+### Specifications
+
+Behaviour is specified separately from the unit tests, following the convention
+used across the Cratis and Ada codebases: `for_<subject>` names what is under
+specification, `when_<scenario>` names the situation, and each
+`should_<expectation>` observes exactly one thing — so a failure reads as a
+sentence and names precisely what broke.
+
+```
+for_branch_prunability
+  when_a_branch_was_squash_merged
+    should_recognise_the_work_is_already_upstream
+    should_consider_it_safe_to_delete
+    should_explain_that_the_content_is_upstream
+    should_force_the_delete_since_git_still_calls_it_unmerged
+  when_a_branchs_upstream_was_deleted_while_it_held_local_commits
+    should_treat_it_as_irreversible_rather_than_assume_a_squash_merge
+    should_say_the_upstream_was_deleted_rather_than_that_it_lacks_the_commits
+```
+
+Each scenario establishes its context through `given`, performs the act once in
+`BECAUSE`, and only observes thereafter. The fixtures build **real git
+repositories with real remotes** and real directory trees rather than mocking
+them — whether a branch is recoverable turns on what a remote can actually
+reach, so a mock would only assert that the fixture agrees with itself.
+
+Where the unit tests beside the code check mechanics — path guards, ordering,
+glob matching — the specifications drive the real scanners and assert on what a
+user would be shown: the group, the risk, the wording, and the exact command.
+
+### Tests
+
+The UI is rendered through ratatui's `TestBackend` and asserted against the real
+cell buffer, including terminals far too small to draw. The deletion paths are
+covered directly: refusing broad paths, dry-run leaving the disk alone, trashing
+keeping contents recoverable, emptying refusing anything outside a trash, and
+overlapping selections counting their bytes once.
 
 ## License
 

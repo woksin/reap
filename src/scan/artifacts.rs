@@ -210,7 +210,9 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     }
     // Catch strays sitting directly in $HOME — an `npm install` run in the
     // wrong directory leaves a node_modules no root would ever cover.
-    if let Some(home) = super::home_dir() {
+    if opts.scan_home_strays
+        && let Some(home) = super::home_dir()
+    {
         let depth = opts.max_depth;
         collect(&home, depth, depth, rules, opts, &mut hits);
     }
