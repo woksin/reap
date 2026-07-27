@@ -158,7 +158,9 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
-          reported="$(./target/${{ matrix.target }}/release/reap${{ matrix.exe }} --version)"
+          # `tr -d '\r'` so a carriage return from a Windows runner cannot fail
+          # a comparison against a binary that is perfectly fine.
+          reported="$(./target/${{ matrix.target }}/release/reap${{ matrix.exe }} --version | tr -d '\r')"
           echo "$reported"
           [ "$reported" = "reap $VERSION" ]
 

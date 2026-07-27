@@ -6,6 +6,7 @@ mod model;
 mod reaper;
 mod recipes;
 mod scan;
+mod settings;
 #[cfg(test)]
 mod specs;
 mod trash;
@@ -551,6 +552,26 @@ fn run(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
 }
 
 fn handle_key(app: &mut App, code: KeyCode) {
+    // Drawn over every screen, so it is dismissed before every screen's keys —
+    // and by any of them, since the one thing someone wants after reading a
+    // legend is to get back to what they were doing.
+    if app.legend {
+        app.legend = false;
+        return;
+    }
+    // Everywhere except the screens where a letter is being typed into
+    // something, which is the one place a shortcut must not steal it.
+    if let KeyCode::Char('L') = code
+        && matches!(
+            app.mode,
+            Mode::Browsing | Mode::Recipes | Mode::Report | Mode::Settings
+        )
+        && !app.settings_editing()
+    {
+        app.legend = true;
+        return;
+    }
+
     match app.mode {
         // A document, so it scrolls rather than closing under the first key
         // someone presses to read further down it.
@@ -628,8 +649,84 @@ fn handle_key(app: &mut App, code: KeyCode) {
             _ => app.mode = Mode::Browsing,
         },
 
+        // Two keyboards in one screen: while something is being typed every
+        // printable key belongs to the text, and only when it is not do the
+        // single-letter actions mean anything.
+        Mode::Settings if app.settings_editing() => match code {
+            KeyCode::Esc => app.with_settings(|s, _| {
+                s.edit = None;
+                Some("cancelled".into())
+            }),
+            KeyCode::Enter => app.commit_settings_edit(),
+            KeyCode::Backspace => app.with_settings(|s, _| {
+                s.edit.as_mut()?.buffer.pop();
+                None
+            }),
+            KeyCode::Char(c) => app.with_settings(|s, _| {
+                s.edit.as_mut()?.buffer.push(c);
+                None
+            }),
+            _ => {}
+        },
+
+        Mode::Settings => match code {
+            KeyCode::Esc | KeyCode::Char('q') => app.close_settings(),
+            KeyCode::Char('?') => app.mode = Mode::Help,
+            KeyCode::Up | KeyCode::Char('k') => app.with_settings(|s, _| {
+                s.move_cursor(-1);
+                None
+            }),
+            KeyCode::Down | KeyCode::Char('j') => app.with_settings(|s, _| {
+                s.move_cursor(1);
+                None
+            }),
+            KeyCode::PageUp => app.with_settings(|s, _| {
+                s.move_cursor(-10);
+                None
+            }),
+            KeyCode::PageDown => app.with_settings(|s, _| {
+                s.move_cursor(10);
+                None
+            }),
+            KeyCode::Home => app.with_settings(|s, _| {
+                s.move_cursor(-(i32::MAX as isize));
+                None
+            }),
+            KeyCode::End => app.with_settings(|s, _| {
+                s.move_cursor(i32::MAX as isize);
+                None
+            }),
+            // One key for "do the obvious thing here", which is a different
+            // thing on a heading, a switch and an add row.
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                use crate::settings::Row;
+                // Taken by value: every branch below reaches back into `app`
+                // mutably, and a borrow of the row would still be alive.
+                match app.settings.as_ref().and_then(|s| s.current()).cloned() {
+                    Some(Row::Heading(_)) => app.with_settings(|s, cfg| {
+                        s.toggle_section(cfg);
+                        None
+                    }),
+                    Some(Row::Add(_)) => app.with_settings(|s, _| s.begin_add()),
+                    Some(Row::Setting(setting)) if setting.is_switch() => {
+                        app.change_settings(|s, cfg| s.toggle_switch(cfg))
+                    }
+                    Some(Row::Setting(_)) => app.with_settings(|s, cfg| s.begin_edit(cfg)),
+                    _ => {}
+                }
+            }
+            KeyCode::Char('e') => app.with_settings(|s, cfg| s.begin_edit(cfg)),
+            KeyCode::Char('n') => app.with_settings(|s, cfg| s.begin_rename(cfg)),
+            KeyCode::Char('a') => app.with_settings(|s, _| s.begin_add()),
+            KeyCode::Char('x') => app.change_settings(|s, cfg| s.toggle_off(cfg)),
+            KeyCode::Char('g') => app.change_settings(|s, cfg| s.cycle_grade(cfg)),
+            KeyCode::Char('d') => app.change_settings(|s, cfg| s.delete(cfg)),
+            _ => {}
+        },
+
         Mode::Browsing => match code {
             KeyCode::Char('q') => app.quit = true,
+            KeyCode::Char('C') => app.open_settings(),
             // Esc backs out of things rather than quitting: leaving a tool that
             // deletes files should take a deliberate keystroke.
             KeyCode::Esc => {

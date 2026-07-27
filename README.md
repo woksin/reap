@@ -446,6 +446,49 @@ reap --write-config     # documented starter file
 
 Command-line flags override the config, which overrides the defaults.
 
+### `C` — all of it, on screen
+
+All of that was configurable and almost none of it was visible. Ninety cache rules, thirty
+build rules, a dozen recipes and five thresholds decide what you are shown, and the only
+way to read any of it was to open the source. `C` puts the whole lot on one screen:
+
+```
+╭─ Configuration ──────────────────────────────────────────────────────────────────────────────╮
+│                                                                                              │
+│  ▾ Where to look (1)              directories searched for repositories and build output     │
+│     ~/work                                                                          yours    │
+│     + a directory to search                                                                  │
+│  ▾ Scanning (9)                   thresholds, and which scanners run at all                  │
+│     stale after      90 days      days untouched before something counts as stale   yours    │
+│     hide anything under  1MB      the floor under everything reap reports        built-in    │
+│     scan your own files  off      downloads, installers, device backups             yours ✗  │
+│  ▾ Caches (85)                    a path, what clears it, and what it costs to lose          │
+│     my own cache                     ~/.cache/mine    rebuildable                   yours ✓  │
+│     npm cache                    ~/.npm/_cacache      safe                       built-in ✓  │
+│  ▸  Firefox cache        ~/Library/Caches/Firefox     safe                       built-in ✗  │
+│     NuGet global packages          ~/.nuget/packages  safe ✎                     built-in ✓  │
+│  ▸ Never offer (2)     ▸ Re-graded (1)     ▸ Quick reaps (12)                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+  x on/off · g re-grade · a add · L legend · esc back    every change is written as you make it
+```
+
+Every row says where it came from and whether it is on. `e` changes a path, pattern or
+value; `n` renames a rule of yours; `a` adds one; `x` turns a rule off **and turns it back
+on**; `g` re-grades what something costs you; `d` deletes something you added.
+
+Changes are written as you make them, in the same shapes a hand-written config uses — an
+`ignore`, an `[[override]]`, a `[[cache]]`. Nothing learned here stops being true at the
+command line, and a file you wrote by hand is edited in place rather than replaced.
+
+> [!NOTE]
+> A built-in rule can be turned off and re-graded but never edited or deleted. Editing one
+> in place would turn your config from an adjustment to reap's defaults into a replacement
+> for them — and the next release correcting where a vendor hides its cache would silently
+> stop reaching you. `x` and `g` cover the same ground without that cost.
+
+This is also what makes `x` reversible. It used to write a line to a file nobody was
+looking at; now there is a screen to take it back on.
+
 ### Ignoring things
 
 Patterns match against a candidate's **path**, its **label**, and its
@@ -543,6 +586,8 @@ being a component of its own.
 | Key | |
 |---|---|
 | `R` | **quick reap** — one key per standing decision |
+| `C` | **configuration** — every rule reap is working from, and the means to change it |
+| `L` | **legend** — what the marks mean, over whatever you are looking at |
 | `↑ ↓` / `j k` | move |
 | `← →` / `h l` | switch pane |
 | `tab` | toggle pane |

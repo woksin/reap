@@ -14,6 +14,8 @@ pub struct Section {
 /// there is one list rather than one per surface.
 pub const KEYS: &[(&str, &str)] = &[
     ("R", "quick reap — one key per standing decision"),
+    ("C", "configuration — every rule reap is working from"),
+    ("L", "legend — what the marks mean"),
     ("↑ ↓  j k", "move"),
     ("← →  h l", "switch pane"),
     ("tab", "toggle pane"),
@@ -33,6 +35,91 @@ pub const KEYS: &[(&str, &str)] = &[
     ("esc", "clear the filter, then the selection"),
     ("?", "this guide"),
     ("q", "quit"),
+];
+
+/// How a legend entry should be coloured, for the surfaces that have colour.
+///
+/// The interface draws two of these symbols identically and tells them apart by
+/// colour alone — safe and rebuildable are both `●` — so a legend printed in one
+/// colour would be a legend that does not answer the question it was opened to
+/// answer.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Tone {
+    Safe,
+    Caution,
+    Danger,
+    Accent,
+    Dim,
+}
+
+pub struct LegendGroup {
+    pub title: &'static str,
+    /// `(symbol, what it means, how to colour it)`.
+    pub entries: &'static [(&'static str, &'static str, Tone)],
+}
+
+/// Every mark the interface draws, and what it means.
+///
+/// The guide explains the ideas; this names the glyphs. They are separate
+/// because they answer different questions — "what does reap think risk is" is
+/// a paragraph, and "what is that triangle" wants one line without losing your
+/// place in a list of four hundred items.
+pub const LEGEND: &[LegendGroup] = &[
+    LegendGroup {
+        title: "What it costs to lose",
+        entries: &[
+            (
+                "●",
+                "safe · regenerated automatically, nothing is lost",
+                Tone::Safe,
+            ),
+            ("●", "rebuildable · costs time, but no work", Tone::Caution),
+            ("▲", "irreversible · may exist nowhere else", Tone::Danger),
+        ],
+    },
+    LegendGroup {
+        title: "In the list",
+        entries: &[
+            ("◉", "selected · d will reap this", Tone::Accent),
+            ("○", "not selected", Tone::Dim),
+            (
+                "$",
+                "the command that will run, on the highlighted row",
+                Tone::Dim,
+            ),
+            (
+                "─",
+                "a category's share of everything reclaimable",
+                Tone::Dim,
+            ),
+        ],
+    },
+    LegendGroup {
+        title: "On the settings screen",
+        entries: &[
+            ("✓", "on · this rule is in force", Tone::Safe),
+            (
+                "✗",
+                "off · turned off with x, and reversible with it",
+                Tone::Dim,
+            ),
+            (
+                "built-in",
+                "ships with reap · can be turned off and re-graded",
+                Tone::Dim,
+            ),
+            (
+                "yours",
+                "from your config · can also be edited and deleted",
+                Tone::Accent,
+            ),
+            (
+                "✎",
+                "re-graded by you · the rule itself says otherwise",
+                Tone::Caution,
+            ),
+        ],
+    },
 ];
 
 pub const GUIDE: &[Section] = &[
@@ -136,20 +223,36 @@ pub const GUIDE: &[Section] = &[
         ],
     },
     Section {
-        title: "Making it yours",
+        title: "Making it yours — the C key",
         body: &[
-            "x on any item means never offer this again. It writes the pattern to your",
-            "config, so it survives a rescan and a restart.",
+            "C opens everything reap is working from: where it looks, the thresholds,",
+            "every cache and build rule it ships with, what you have told it to ignore,",
+            "and every grading you disagreed with. Each row says whether it is built-in",
+            "or yours, and whether it is on.",
             "",
-            "Everything else lives in ~/.config/reap/config.toml, and",
-            "`reap --write-config` writes a documented starter:",
+            "  enter  open a section, or flip a switch",
+            "  e      change the path, pattern or value",
+            "  n      rename a rule of your own",
+            "  a      add one — a scan root, a cache path, a pattern",
+            "  x      turn a rule off, and press it again to turn it back on",
+            "  g      re-grade what something costs you",
+            "  d      delete something you added",
             "",
-            "  [[artifact]]  another directory your build system produces",
-            "  [[cache]]     another cache, and the command that clears it properly",
-            "  [[recipe]]    another key on the R palette",
-            "  [[override]]  disagree with a risk grading — it is your disk",
+            "Changes are written as you make them, to ~/.config/reap/config.toml —",
+            "the same file `reap --write-config` documents and you can edit by hand.",
+            "A built-in rule can be turned off and re-graded but never edited away, so",
+            "a later release correcting where a vendor hides its cache still reaches you.",
             "",
+            "x works on an item in the list too, and means the same thing there.",
             "Nothing reap knows is compiled in.",
+        ],
+    },
+    Section {
+        title: "What the marks mean — the L key",
+        body: &[
+            "L shows the legend over whatever you are looking at, and any key puts it",
+            "away again — so you can settle what a triangle means without losing your",
+            "place in a list of four hundred items.",
         ],
     },
     Section {
@@ -182,6 +285,14 @@ pub fn plain() -> String {
     for (key, description) in KEYS {
         out.push_str(&format!("  {key:<12} {description}\n"));
     }
+
+    out.push_str("\nLegend\n──────\n");
+    for group in LEGEND {
+        out.push_str(&format!("\n  {}\n", group.title));
+        for (symbol, meaning, _) in group.entries {
+            out.push_str(&format!("    {symbol:<10} {meaning}\n"));
+        }
+    }
     out
 }
 
@@ -199,11 +310,38 @@ mod tests {
     }
 
     #[test]
+    fn the_legend_names_every_mark_the_interface_draws() {
+        // A symbol the interface uses and the legend does not explain is a
+        // symbol nobody can look up — which is the entire job of a legend.
+        let symbols: Vec<&str> = LEGEND
+            .iter()
+            .flat_map(|g| g.entries.iter().map(|(s, ..)| *s))
+            .collect();
+        for mark in ["●", "▲", "◉", "○", "✓", "✗"] {
+            assert!(symbols.contains(&mark), "the legend never explains {mark}");
+        }
+    }
+
+    #[test]
+    fn the_two_marks_drawn_alike_are_told_apart_by_colour() {
+        // Safe and rebuildable are both `●`, so the legend's own entries have
+        // to differ in tone or it explains nothing.
+        let dots: Vec<Tone> = LEGEND
+            .iter()
+            .flat_map(|g| g.entries.iter())
+            .filter(|(symbol, ..)| *symbol == "●")
+            .map(|(.., tone)| *tone)
+            .collect();
+        assert_eq!(dots.len(), 2, "expected two dots, found {}", dots.len());
+        assert_ne!(dots[0], dots[1]);
+    }
+
+    #[test]
     fn every_key_the_interface_binds_is_described() {
         // The guide is the only key list, so a binding missing from it is a
         // binding nobody finds.
         let described: Vec<&str> = KEYS.iter().map(|(k, _)| *k).collect();
-        for key in ["R", "space", "a", "s", "d", "x", "q", "?"] {
+        for key in ["R", "C", "L", "space", "a", "s", "d", "x", "q", "?"] {
             assert!(
                 described
                     .iter()
