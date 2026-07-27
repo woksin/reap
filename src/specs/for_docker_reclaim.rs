@@ -439,7 +439,7 @@ mod when_the_configuration_ignores_a_docker_group {
         // README documents. Docker items have no path, so the group is the
         // only handle there is.
         cfg.ignore.push("docker/unused volumes".into());
-        a_docker_daemon::reporting_what_was_captured().candidates_with(cfg)
+        a_docker_daemon::reporting_what_was_captured().candidates_with(&cfg)
     });
 
     #[test]

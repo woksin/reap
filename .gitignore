@@ -1,1 +1,4 @@
 target
+
+# Scratch space for local agent worktrees, which are created inside the repo.
+.claude/

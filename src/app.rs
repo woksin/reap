@@ -30,18 +30,18 @@ pub enum Sort {
 }
 
 impl Sort {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Sort::Size => "size",
-            Sort::Age => "age",
-            Sort::Name => "name",
+            Self::Size => "size",
+            Self::Age => "age",
+            Self::Name => "name",
         }
     }
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         match self {
-            Sort::Size => Sort::Age,
-            Sort::Age => Sort::Name,
-            Sort::Name => Sort::Size,
+            Self::Size => Self::Age,
+            Self::Age => Self::Name,
+            Self::Name => Self::Size,
         }
     }
 }
@@ -53,6 +53,23 @@ pub enum Node {
     All,
     Category(Category),
     Group(Category, String),
+}
+
+/// One line of the reap log: what was attempted, whether it worked, and why
+/// not when it did not.
+pub type ReapLogEntry = (String, bool, Option<String>);
+
+/// Move `idx` by `delta`, clamped to `0..=max`.
+///
+/// Kept in `usize` with saturating steps rather than routed through `isize`, so
+/// the extremes the key handler uses for Home and End arrive at the ends of the
+/// list instead of wrapping through a signed conversion on the way.
+fn offset(idx: usize, delta: isize, max: usize) -> usize {
+    if delta < 0 {
+        idx.saturating_sub(delta.unsigned_abs())
+    } else {
+        idx.saturating_add(delta.unsigned_abs()).min(max)
+    }
 }
 
 pub struct App {
@@ -78,7 +95,7 @@ pub struct App {
     /// Anchor for a range selection, set by `v`.
     pub range_anchor: Option<usize>,
 
-    pub reap_log: Vec<(String, bool, Option<String>)>,
+    pub reap_log: Vec<ReapLogEntry>,
     pub freed: u64,
     pub dry_run: bool,
     /// Move paths to the trash instead of unlinking them.
@@ -191,6 +208,11 @@ impl App {
     }
 
     /// Drain both worker channels. Returns true when something changed.
+    #[expect(
+        clippy::useless_let_if_seq,
+        reason = "three independent blocks each raise this flag; collapsing the \
+                  first into an `if` expression would not fold in the others"
+    )]
     pub fn poll(&mut self) -> bool {
         let mut dirty = false;
 
@@ -417,8 +439,7 @@ impl App {
         if len == 0 {
             return;
         }
-        let next = (*idx as isize + delta).clamp(0, len as isize - 1);
-        *idx = next as usize;
+        *idx = offset(*idx, delta, len - 1);
         if self.focus == Focus::Sidebar {
             self.item_idx = 0;
             self.rebuild();
@@ -456,8 +477,7 @@ impl App {
         if self.recipes.is_empty() {
             return;
         }
-        let last = self.recipes.len() as isize - 1;
-        self.recipe_idx = (self.recipe_idx as isize + delta).clamp(0, last) as usize;
+        self.recipe_idx = offset(self.recipe_idx, delta, self.recipes.len() - 1);
     }
 
     /// Run whichever recipe the palette cursor is on.
@@ -557,8 +577,7 @@ impl App {
                 let target = self
                     .visible
                     .get(lo)
-                    .map(|&i| !self.items[i].selected)
-                    .unwrap_or(true);
+                    .is_none_or(|&i| !self.items[i].selected);
                 for &i in self.visible.get(lo..=hi).unwrap_or(&[]) {
                     self.items[i].selected = target;
                 }
@@ -636,7 +655,7 @@ impl App {
 
     /// Permanently remove what this run put in the trash.
     pub fn empty_trash(&mut self) {
-        let removed = crate::reaper::empty_trashed(&self.trashed);
+        let removed = reaper::empty_trashed(&self.trashed);
         self.status = format!("emptied {removed} items from the trash");
         self.trashed.clear();
         self.disk_after = std::env::current_dir()

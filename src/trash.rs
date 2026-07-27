@@ -19,7 +19,7 @@ fn mount_point(path: &Path) -> io::Result<PathBuf> {
     while let Some(parent) = cur.parent().map(Path::to_path_buf) {
         match fs::symlink_metadata(&parent) {
             Ok(m) if m.dev() == dev => {
-                best = parent.clone();
+                best.clone_from(&parent);
                 cur = parent;
             }
             _ => break,
@@ -47,8 +47,7 @@ fn existing_dev(path: &Path) -> Option<u64> {
 fn uid() -> u32 {
     crate::scan::home_dir()
         .and_then(|h| fs::metadata(h).ok())
-        .map(|m| m.uid())
-        .unwrap_or(0)
+        .map_or(0, |m| m.uid())
 }
 
 /// The trash directory that `path` can be renamed into.

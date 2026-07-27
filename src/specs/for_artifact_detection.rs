@@ -157,7 +157,7 @@ mod when_the_configuration_adds_a_rule {
         a_project::new()
             .with_a_file("Makefile")
             .with_a_directory("my-output")
-            .candidates_with(cfg)
+            .candidates_with(&cfg)
     });
 
     #[test]
@@ -190,7 +190,7 @@ mod when_the_configuration_adds_a_rule {
         // Same rule, but nothing proves this directory is its output.
         let without_evidence = a_project::new()
             .with_a_directory("my-output")
-            .candidates_with(cfg);
+            .candidates_with(&cfg);
         assert!(
             without_evidence.is_empty(),
             "found: {:?}",
@@ -210,7 +210,7 @@ mod when_the_configuration_ignores_a_path {
             .with_a_directory("node_modules")
             .with_a_file("Cargo.toml")
             .with_a_directory("target")
-            .candidates_with(cfg)
+            .candidates_with(&cfg)
     });
 
     #[test]

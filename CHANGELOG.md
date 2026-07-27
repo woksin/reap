@@ -29,6 +29,17 @@ on each tag are the generated list of pull requests.
 
 - Release assets are named for the machine rather than the Rust target triple:
   `reap-macos-arm64.tar.gz` instead of `reap-aarch64-apple-darwin.tar.gz`.
+- `--min-size` now refuses a value it cannot read instead of quietly carrying
+  on. `--min-size garbage` used to become zero, which removed the size floor
+  altogether, and an unknown unit like `50XB` used to mean 50 bytes; both now
+  stop the run and say so. A `library_cache_floor` in the configuration file
+  that cannot be read falls back to its documented default rather than to zero.
+
+### Fixed
+
+- Docker's "about a minute ago" was parsed through a redundant float comparison
+  that could not be relied on; the age of a Docker item is now settled by the
+  wording alone, and a nonsensical count is rejected rather than rounded.
 
 ## [1.0.0]
 

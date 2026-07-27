@@ -162,34 +162,39 @@ pub enum RiskName {
     Irreversible,
 }
 
-fn default_recipe_risk() -> RiskName {
+const fn default_recipe_risk() -> RiskName {
     RiskName::Safe
 }
 
-fn is_false(b: &bool) -> bool {
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde hands `skip_serializing_if` the field by reference; taking \
+              it by value does not compile"
+)]
+const fn is_false(b: &bool) -> bool {
     !*b
 }
 
-fn default_risk() -> RiskName {
+const fn default_risk() -> RiskName {
     RiskName::Rebuildable
 }
 
 impl From<RiskName> for Risk {
-    fn from(r: RiskName) -> Risk {
+    fn from(r: RiskName) -> Self {
         match r {
-            RiskName::Safe => Risk::Safe,
-            RiskName::Rebuildable => Risk::Caution,
-            RiskName::Irreversible => Risk::Danger,
+            RiskName::Safe => Self::Safe,
+            RiskName::Rebuildable => Self::Caution,
+            RiskName::Irreversible => Self::Danger,
         }
     }
 }
 
 impl From<Risk> for RiskName {
-    fn from(r: Risk) -> RiskName {
+    fn from(r: Risk) -> Self {
         match r {
-            Risk::Safe => RiskName::Safe,
-            Risk::Caution => RiskName::Rebuildable,
-            Risk::Danger => RiskName::Irreversible,
+            Risk::Safe => Self::Safe,
+            Risk::Caution => Self::Rebuildable,
+            Risk::Danger => Self::Irreversible,
         }
     }
 }
@@ -226,8 +231,8 @@ pub enum LoadError {
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoadError::Read(e) => write!(f, "{e}"),
-            LoadError::Parse(e) => write!(f, "{e}"),
+            Self::Read(e) => write!(f, "{e}"),
+            Self::Parse(e) => write!(f, "{e}"),
         }
     }
 }
@@ -275,7 +280,7 @@ impl Config {
     }
 }
 
-const TEMPLATE: &str = r##"# reap configuration
+const TEMPLATE: &str = r#"# reap configuration
 #
 # Every value here is optional, and command-line flags override it.
 # Delete anything you do not need.
@@ -398,7 +403,7 @@ never_descend = [
 # name = "This project only"
 # match = ["~/work/big-monorepo/*"]
 # max_risk = "rebuildable"
-"##;
+"#;
 
 const CONFIG_HEADER: &str = "\
 # reap configuration.

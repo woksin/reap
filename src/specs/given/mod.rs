@@ -23,8 +23,7 @@ impl scratch {
         // Nanoseconds keep parallel specs from colliding in the shared temp dir.
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let path =
             std::env::temp_dir().join(format!("reap-spec-{what}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);

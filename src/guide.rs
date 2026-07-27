@@ -145,17 +145,21 @@ pub const GUIDE: &[Section] = &[
 
 /// The guide as plain text, for `reap guide`.
 pub fn plain() -> String {
+    use std::fmt::Write as _;
+
+    // Formatting straight into the buffer rather than through an intermediate
+    // `format!`. Writing to a String cannot fail, so there is no error to carry.
     let mut out = String::new();
     for section in GUIDE {
-        out.push_str(&format!("\n{}\n", section.title));
-        out.push_str(&format!("{}\n", "─".repeat(section.title.len())));
+        let _ = writeln!(out, "\n{}", section.title);
+        let _ = writeln!(out, "{}", "─".repeat(section.title.len()));
         for line in section.body {
-            out.push_str(&format!("{line}\n"));
+            let _ = writeln!(out, "{line}");
         }
     }
     out.push_str("\nKeys\n────\n");
     for (key, description) in KEYS {
-        out.push_str(&format!("  {key:<12} {description}\n"));
+        let _ = writeln!(out, "  {key:<12} {description}");
     }
     out
 }

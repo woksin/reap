@@ -49,7 +49,9 @@ fn mtime_of(path: &Path) -> Option<u64> {
     let t = m.modified().ok()?;
     t.duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .map(|d| d.as_nanos() as u64)
+        // Nanoseconds overflow a u64 in 2554. Saturating there keeps the value
+        // ordered rather than wrapping it back to a plausible-looking time.
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 impl SizeCache {
@@ -116,7 +118,7 @@ impl SizeCache {
     }
 
     pub fn save(&self) {
-        if !self.enabled || !self.dirty.lock().map(|d| *d).unwrap_or(false) {
+        if !self.enabled || !self.dirty.lock().is_ok_and(|d| *d) {
             return;
         }
         let Some(path) = cache_path() else { return };

@@ -36,8 +36,8 @@ impl Strategy {
         match self {
             // `brew upgrade` against a stale local copy of the tap reports
             // "already installed", so the fetch has to happen first.
-            Strategy::Homebrew => Some(("brew", vec!["upgrade", "reap"])),
-            Strategy::Cargo => Some((
+            Self::Homebrew => Some(("brew", vec!["upgrade", "reap"])),
+            Self::Cargo => Some((
                 "cargo",
                 vec![
                     "install",
@@ -46,14 +46,14 @@ impl Strategy {
                     "--force",
                 ],
             )),
-            Strategy::Manual => None,
+            Self::Manual => None,
         }
     }
 
     /// Run before `command`, for installers that cache their index.
     pub fn refresh_command(self) -> Option<(&'static str, Vec<&'static str>)> {
         match self {
-            Strategy::Homebrew => Some(("brew", vec!["update"])),
+            Self::Homebrew => Some(("brew", vec!["update"])),
             _ => None,
         }
     }
@@ -61,7 +61,7 @@ impl Strategy {
     /// What to tell someone whose installation reap cannot drive.
     pub fn instructions(self) -> String {
         match self {
-            Strategy::Manual => format!(
+            Self::Manual => format!(
                 "curl -fsSL https://github.com/{REPO}/releases/latest/download/reap-{}.tar.gz | tar xz\n\
                  sudo mv reap {}",
                 asset_name(),
@@ -70,8 +70,8 @@ impl Strategy {
                     .and_then(|p| p.parent().map(|d| d.display().to_string()))
                     .unwrap_or_else(|| "/usr/local/bin".into()),
             ),
-            Strategy::Homebrew => "brew update && brew upgrade reap".into(),
-            Strategy::Cargo => "cargo install --git https://github.com/woksin/reap --force".into(),
+            Self::Homebrew => "brew update && brew upgrade reap".into(),
+            Self::Cargo => "cargo install --git https://github.com/woksin/reap --force".into(),
         }
     }
 }
@@ -94,9 +94,7 @@ pub fn asset_name() -> String {
 
 /// Work out how this binary was installed, from where it lives.
 pub fn detect() -> Strategy {
-    std::env::current_exe()
-        .map(|p| strategy_for(&p))
-        .unwrap_or(Strategy::Manual)
+    std::env::current_exe().map_or(Strategy::Manual, |p| strategy_for(&p))
 }
 
 /// Split out so the decision can be specified without moving the binary.

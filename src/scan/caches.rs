@@ -337,9 +337,7 @@ fn unnamed_cache_root(home: &std::path::Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Caches")
     } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".cache"))
+        std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home.join(".cache"), PathBuf::from)
     }
 }
 
@@ -430,7 +428,7 @@ fn library_caches(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent
 
     let entries: Vec<PathBuf> = rd
         .flatten()
-        .filter(|e| e.file_type().map(|f| f.is_dir()).unwrap_or(false))
+        .filter(|e| e.file_type().is_ok_and(|f| f.is_dir()))
         .map(|e| e.path())
         .filter(|p| {
             let name = p

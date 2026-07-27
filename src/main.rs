@@ -26,6 +26,14 @@ use std::time::{Duration, Instant};
 use util::human;
 
 /// Find and prune the stale things eating your disk.
+///
+/// These doc comments are the `--help` text, so they are written for someone
+/// reading a terminal rather than rustdoc.
+#[allow(
+    rustdoc::broken_intra_doc_links,
+    reason = "the bracketed defaults, e.g. [30], are help text rather than doc \
+              links; escaping them would print the backslashes in --help"
+)]
 #[derive(Parser)]
 #[command(name = "reap", version, about, long_about = None)]
 struct Cli {
@@ -97,7 +105,7 @@ struct Cli {
     #[arg(long)]
     no_cache: bool,
 
-    /// Configuration file. Defaults to $XDG_CONFIG_HOME/reap/config.toml,
+    /// Configuration file. Defaults to $`XDG_CONFIG_HOME/reap/config.toml`,
     /// or ~/.config/reap/config.toml.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
@@ -132,11 +140,11 @@ enum RiskCeiling {
 }
 
 impl From<RiskCeiling> for Risk {
-    fn from(c: RiskCeiling) -> Risk {
+    fn from(c: RiskCeiling) -> Self {
         match c {
-            RiskCeiling::Safe => Risk::Safe,
-            RiskCeiling::Rebuildable => Risk::Caution,
-            RiskCeiling::Irreversible => Risk::Danger,
+            RiskCeiling::Safe => Self::Safe,
+            RiskCeiling::Rebuildable => Self::Caution,
+            RiskCeiling::Irreversible => Self::Danger,
         }
     }
 }
@@ -146,11 +154,28 @@ fn resolve<T>(flag: Option<T>, configured: Option<T>, default: T) -> T {
     flag.or(configured).unwrap_or(default)
 }
 
-pub fn parse_size(s: &str) -> u64 {
+/// Parse a size written the way a person types it, e.g. `50MB`, into bytes.
+///
+/// `None` means the string was not a size this understands, which is a
+/// different thing from zero. Refusing to guess matters for the same reason it
+/// does in the Docker parser: this figure decides what is too small to bother
+/// showing, so reading `50XB` as 50 bytes would quietly put thousands of extra
+/// entries in front of a delete key, and reading nonsense as 0 would remove the
+/// floor altogether.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is checked finite and non-negative just above, and a \
+              float-to-int cast saturates rather than wraps"
+)]
+pub fn parse_size(s: &str) -> Option<u64> {
     let s = s.trim();
     let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
-    let num: f64 = num.trim().parse().unwrap_or(0.0);
+    let num: f64 = num.trim().parse().ok()?;
+    if !num.is_finite() || num < 0.0 {
+        return None;
+    }
     // SI by default to match the display units; the binary suffixes are
     // accepted too for anyone who types them out of habit.
     let mult: f64 = match unit.trim().to_ascii_uppercase().as_str() {
@@ -163,9 +188,9 @@ pub fn parse_size(s: &str) -> u64 {
         "MIB" => 1024f64.powi(2),
         "GIB" => 1024f64.powi(3),
         "TIB" => 1024f64.powi(4),
-        _ => 1.0,
+        _ => return None,
     };
-    (num * mult) as u64
+    Some((num * mult) as u64)
 }
 
 fn main() -> Result<()> {
@@ -225,7 +250,9 @@ fn main() -> Result<()> {
         cache: sizes.clone(),
         roots,
         stale_days: resolve(cli.stale_days, cfg.scan.stale_days, 30),
-        min_size: parse_size(&min_size),
+        min_size: parse_size(&min_size).ok_or_else(|| {
+            anyhow::anyhow!("cannot read {min_size:?} as a size — try something like 50MB")
+        })?,
         max_depth: resolve(cli.depth, cfg.scan.depth, 8),
         skip_docker: cli.no_docker || cfg.scan.docker == Some(false),
         skip_caches: cli.no_caches || cfg.scan.caches == Some(false),
@@ -328,25 +355,22 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
 fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Result<()> {
     let items = app::collect_headless(opts);
 
-    let (chosen, how): (Vec<model::Candidate>, String) = match cli.recipe {
-        Some(key) => {
-            let recipes = recipes::compile(cfg);
-            let recipe = recipes
-                .iter()
-                .find(|r| r.key == key)
-                .ok_or_else(|| anyhow::anyhow!("no recipe bound to {key:?}"))?;
-            (
-                items.into_iter().filter(|i| recipe.covers(i)).collect(),
-                recipe.name.clone(),
-            )
-        }
-        None => {
-            let ceiling: Risk = cli.risk.unwrap_or(RiskCeiling::Safe).into();
-            (
-                items.into_iter().filter(|i| i.risk <= ceiling).collect(),
-                format!("everything up to {}", ceiling.label()),
-            )
-        }
+    let (chosen, how): (Vec<model::Candidate>, String) = if let Some(key) = cli.recipe {
+        let recipes = recipes::compile(cfg);
+        let recipe = recipes
+            .iter()
+            .find(|r| r.key == key)
+            .ok_or_else(|| anyhow::anyhow!("no recipe bound to {key:?}"))?;
+        (
+            items.into_iter().filter(|i| recipe.covers(i)).collect(),
+            recipe.name.clone(),
+        )
+    } else {
+        let ceiling: Risk = cli.risk.unwrap_or(RiskCeiling::Safe).into();
+        (
+            items.into_iter().filter(|i| i.risk <= ceiling).collect(),
+            format!("everything up to {}", ceiling.label()),
+        )
     };
 
     let total: u64 = chosen.iter().map(|i| i.size).sum();
@@ -513,12 +537,13 @@ fn list_mode(opts: ScanOpts) -> Result<()> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
-    let mut tick: u64 = 0;
-    let mut last_tick = Instant::now();
     const TICK: Duration = Duration::from_millis(80);
 
+    let mut tick: u64 = 0;
+    let mut last_tick = Instant::now();
+
     loop {
-        terminal.draw(|f| ui::render(f, &mut app, tick))?;
+        terminal.draw(|f| ui::render(f, &app, tick))?;
 
         // Poll briefly so scanner output and the spinner both stay live.
         if event::poll(TICK)?
@@ -545,133 +570,154 @@ fn run(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
     Ok(())
 }
 
+/// Hand a keypress to whichever mode currently owns the screen.
 fn handle_key(app: &mut App, code: KeyCode) {
     match app.mode {
-        // A document, so it scrolls rather than closing under the first key
-        // someone presses to read further down it.
-        Mode::Help => match code {
-            KeyCode::Up | KeyCode::Char('k') => app.help_scroll = app.help_scroll.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => app.help_scroll += 1,
-            KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
-            KeyCode::PageDown => app.help_scroll += 10,
-            KeyCode::Home => app.help_scroll = 0,
-            _ => {
-                app.help_scroll = 0;
-                app.mode = Mode::Browsing;
-            }
-        },
-
-        Mode::Search => match code {
-            KeyCode::Esc => {
-                app.search.clear();
-                app.mode = Mode::Browsing;
-                app.rebuild();
-            }
-            KeyCode::Enter => app.mode = Mode::Browsing,
-            KeyCode::Backspace => {
-                app.search.pop();
-                app.rebuild();
-            }
-            KeyCode::Char(c) => {
-                app.search.push(c);
-                app.item_idx = 0;
-                app.rebuild();
-            }
-            _ => {}
-        },
-
-        Mode::Confirm => match code {
-            KeyCode::Esc => app.mode = Mode::Browsing,
-            // Held until the acknowledgement the selection demands is given.
-            KeyCode::Enter if app.confirm_satisfied() => app.start_reap(),
-            KeyCode::Enter => {}
-            KeyCode::Backspace => {
-                app.confirm_input.pop();
-            }
-            KeyCode::Char(c) => app.confirm_input.push(c),
-            _ => {}
-        },
-
+        Mode::Help => in_help(app, code),
+        Mode::Search => in_search(app, code),
+        Mode::Confirm => in_confirm(app, code),
         // Deletion is in flight; the only way out is the process signal.
         Mode::Reaping => {}
+        Mode::Report => in_report(app, code),
+        Mode::Recipes => in_recipes(app, code),
+        Mode::Browsing => in_browsing(app, code),
+    }
+}
 
-        Mode::Report => match code {
-            KeyCode::Char('q') => app.quit = true,
-            KeyCode::Char('r') => {
-                app.mode = Mode::Browsing;
-                app.rescan();
-            }
-            // Only offered when this run actually trashed something.
-            KeyCode::Char('e') if !app.trashed.is_empty() => app.empty_trash(),
-            KeyCode::Esc | KeyCode::Enter => app.mode = Mode::Browsing,
-            _ => {}
-        },
+/// A document, so it scrolls rather than closing under the first key someone
+/// presses to read further down it.
+const fn in_help(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll = app.help_scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll += 1,
+        KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+        KeyCode::PageDown => app.help_scroll += 10,
+        KeyCode::Home => app.help_scroll = 0,
+        _ => {
+            app.help_scroll = 0;
+            app.mode = Mode::Browsing;
+        }
+    }
+}
 
-        // One key per standing decision. Anything unbound closes the palette
-        // rather than doing nothing, so a mistyped key never leaves you stuck
-        // in front of a list of ways to delete things.
-        Mode::Recipes => match code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.mode = Mode::Browsing,
-            KeyCode::Up => app.move_recipe_cursor(-1),
-            KeyCode::Down => app.move_recipe_cursor(1),
-            KeyCode::Enter => app.apply_highlighted_recipe(),
-            // A recipe's own key wins over the vim aliases: a user who binds
-            // `j` gets their recipe, and the arrows still navigate.
-            KeyCode::Char(c) if app.recipes.iter().any(|r| r.key == c) => app.apply_recipe(c),
-            KeyCode::Char('k') => app.move_recipe_cursor(-1),
-            KeyCode::Char('j') => app.move_recipe_cursor(1),
-            _ => app.mode = Mode::Browsing,
-        },
+fn in_search(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.search.clear();
+            app.mode = Mode::Browsing;
+            app.rebuild();
+        }
+        KeyCode::Enter => app.mode = Mode::Browsing,
+        KeyCode::Backspace => {
+            app.search.pop();
+            app.rebuild();
+        }
+        KeyCode::Char(c) => {
+            app.search.push(c);
+            app.item_idx = 0;
+            app.rebuild();
+        }
+        _ => {}
+    }
+}
 
-        Mode::Browsing => match code {
-            KeyCode::Char('q') => app.quit = true,
-            // Esc backs out of things rather than quitting: leaving a tool that
-            // deletes files should take a deliberate keystroke.
-            KeyCode::Esc => {
-                if !app.search.is_empty() {
-                    app.search.clear();
-                    app.rebuild();
-                } else {
-                    app.clear_selection();
-                }
+fn in_confirm(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => app.mode = Mode::Browsing,
+        // Held until the acknowledgement the selection demands is given. Until
+        // then Enter falls through to the wildcard and does nothing — it is not
+        // a `Char`, so the text arm below never sees it.
+        KeyCode::Enter if app.confirm_satisfied() => app.start_reap(),
+        KeyCode::Backspace => {
+            app.confirm_input.pop();
+        }
+        KeyCode::Char(c) => app.confirm_input.push(c),
+        _ => {}
+    }
+}
+
+fn in_report(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('r') => {
+            app.mode = Mode::Browsing;
+            app.rescan();
+        }
+        // Only offered when this run actually trashed something.
+        KeyCode::Char('e') if !app.trashed.is_empty() => app.empty_trash(),
+        KeyCode::Esc | KeyCode::Enter => app.mode = Mode::Browsing,
+        _ => {}
+    }
+}
+
+/// One key per standing decision. Anything unbound closes the palette rather
+/// than doing nothing, so a mistyped key never leaves you stuck in front of a
+/// list of ways to delete things.
+fn in_recipes(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q' | '?') => app.mode = Mode::Browsing,
+        KeyCode::Enter => app.apply_highlighted_recipe(),
+        // A recipe's own key wins over the vim aliases: a user who binds `j`
+        // gets their recipe, and the arrows still navigate. This arm has to
+        // stay above them to keep that order; the arrows are unaffected by it,
+        // since it only ever matches a `Char`.
+        KeyCode::Char(c) if app.recipes.iter().any(|r| r.key == c) => app.apply_recipe(c),
+        KeyCode::Up | KeyCode::Char('k') => app.move_recipe_cursor(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_recipe_cursor(1),
+        _ => app.mode = Mode::Browsing,
+    }
+}
+
+fn in_browsing(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') => app.quit = true,
+        // Esc backs out of things rather than quitting: leaving a tool that
+        // deletes files should take a deliberate keystroke.
+        KeyCode::Esc => {
+            if app.search.is_empty() {
+                app.clear_selection();
+            } else {
+                app.search.clear();
+                app.rebuild();
             }
-            KeyCode::Char('?') => app.mode = Mode::Help,
-            KeyCode::Char('R') => app.mode = Mode::Recipes,
-            KeyCode::Char('/') => app.mode = Mode::Search,
-            KeyCode::Tab | KeyCode::BackTab => {
-                app.focus = if app.focus == Focus::Sidebar {
-                    Focus::Items
-                } else {
-                    Focus::Sidebar
-                };
+        }
+        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('R') => app.mode = Mode::Recipes,
+        KeyCode::Char('/') => app.mode = Mode::Search,
+        KeyCode::Tab | KeyCode::BackTab => {
+            app.focus = if app.focus == Focus::Sidebar {
+                Focus::Items
+            } else {
+                Focus::Sidebar
+            };
+        }
+        KeyCode::Left | KeyCode::Char('h') => app.focus = Focus::Sidebar,
+        KeyCode::Right | KeyCode::Char('l') => app.focus = Focus::Items,
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
+        KeyCode::PageUp => app.move_cursor(-10),
+        KeyCode::PageDown => app.move_cursor(10),
+        // Further than any list is long; the cursor saturates at the ends.
+        KeyCode::Home => app.move_cursor(isize::MIN),
+        KeyCode::End => app.move_cursor(isize::MAX),
+        KeyCode::Enter if app.focus == Focus::Sidebar => app.toggle_expand(),
+        KeyCode::Char(' ') => {
+            if app.focus == Focus::Items {
+                app.toggle_current();
+            } else {
+                app.toggle_expand();
             }
-            KeyCode::Left | KeyCode::Char('h') => app.focus = Focus::Sidebar,
-            KeyCode::Right | KeyCode::Char('l') => app.focus = Focus::Items,
-            KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
-            KeyCode::PageUp => app.move_cursor(-10),
-            KeyCode::PageDown => app.move_cursor(10),
-            KeyCode::Home => app.move_cursor(-(i32::MAX as isize)),
-            KeyCode::End => app.move_cursor(i32::MAX as isize),
-            KeyCode::Enter if app.focus == Focus::Sidebar => app.toggle_expand(),
-            KeyCode::Char(' ') => {
-                if app.focus == Focus::Items {
-                    app.toggle_current();
-                } else {
-                    app.toggle_expand();
-                }
-            }
-            KeyCode::Char('a') => app.set_all_visible(true),
-            KeyCode::Char('s') => app.select_safe(),
-            KeyCode::Char('n') => app.clear_selection(),
-            KeyCode::Char('o') => app.cycle_sort(),
-            KeyCode::Char('f') => app.cycle_risk_filter(),
-            KeyCode::Char('v') => app.toggle_range(),
-            KeyCode::Char('i') => app.inspect_current(),
-            KeyCode::Char('x') => app.ignore_current(),
-            KeyCode::Char('d') => app.begin_confirm(),
-            KeyCode::Char('r') => app.rescan(),
-            _ => {}
-        },
+        }
+        KeyCode::Char('a') => app.set_all_visible(true),
+        KeyCode::Char('s') => app.select_safe(),
+        KeyCode::Char('n') => app.clear_selection(),
+        KeyCode::Char('o') => app.cycle_sort(),
+        KeyCode::Char('f') => app.cycle_risk_filter(),
+        KeyCode::Char('v') => app.toggle_range(),
+        KeyCode::Char('i') => app.inspect_current(),
+        KeyCode::Char('x') => app.ignore_current(),
+        KeyCode::Char('d') => app.begin_confirm(),
+        KeyCode::Char('r') => app.rescan(),
+        _ => {}
     }
 }

@@ -10,19 +10,14 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 4] = [
-        Category::Git,
-        Category::Artifacts,
-        Category::Docker,
-        Category::Caches,
-    ];
+    pub const ALL: [Self; 4] = [Self::Git, Self::Artifacts, Self::Docker, Self::Caches];
 
-    pub fn title(self) -> &'static str {
+    pub const fn title(self) -> &'static str {
         match self {
-            Category::Git => "Git",
-            Category::Artifacts => "Build artifacts",
-            Category::Docker => "Docker",
-            Category::Caches => "Caches",
+            Self::Git => "Git",
+            Self::Artifacts => "Build artifacts",
+            Self::Docker => "Docker",
+            Self::Caches => "Caches",
         }
     }
 }
@@ -39,19 +34,21 @@ pub enum Risk {
 }
 
 impl Risk {
-    pub fn dot(self) -> &'static str {
+    pub const fn dot(self) -> &'static str {
         match self {
-            Risk::Safe => "●",
-            Risk::Caution => "●",
-            Risk::Danger => "▲",
+            // The two recoverable levels share a glyph and are told apart by
+            // colour; only the irreversible one changes shape, so it still
+            // reads as a warning where colour is missing.
+            Self::Safe | Self::Caution => "●",
+            Self::Danger => "▲",
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Risk::Safe => "safe",
-            Risk::Caution => "rebuildable",
-            Risk::Danger => "irreversible",
+            Self::Safe => "safe",
+            Self::Caution => "rebuildable",
+            Self::Danger => "irreversible",
         }
     }
 }
@@ -72,8 +69,8 @@ pub enum Action {
 impl Action {
     pub fn describe(&self) -> String {
         match self {
-            Action::Remove(p) => format!("rm -rf {}", crate::util::tilde(p)),
-            Action::Run { program, args, .. } => {
+            Self::Remove(p) => format!("rm -rf {}", crate::util::tilde(p)),
+            Self::Run { program, args, .. } => {
                 format!("{program} {}", args.join(" "))
             }
         }
@@ -121,7 +118,7 @@ impl Candidate {
         }
     }
 
-    pub fn with_age(mut self, days: Option<u64>) -> Self {
+    pub const fn with_age(mut self, days: Option<u64>) -> Self {
         self.age_days = days;
         self
     }

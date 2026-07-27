@@ -27,7 +27,7 @@ fn fixture() -> App {
         opts,
         false,
         false,
-        Default::default(),
+        crate::config::Config::default(),
         PathBuf::from("/dev/null"),
     );
     app.pending.clear();
@@ -72,7 +72,7 @@ fn fixture() -> App {
     app
 }
 
-fn draw(app: &mut App, w: u16, h: u16) -> String {
+fn draw(app: &App, w: u16, h: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal.draw(|f| ui::render(f, app, 0)).unwrap();
     let buf = terminal.backend().buffer().clone();
@@ -88,8 +88,8 @@ fn draw(app: &mut App, w: u16, h: u16) -> String {
 
 #[test]
 fn renders_totals_categories_and_items() {
-    let mut app = fixture();
-    let out = draw(&mut app, 110, 30);
+    let app = fixture();
+    let out = draw(&app, 110, 30);
 
     // Header total: the three fixtures add up to 17.42 GB.
     assert!(out.contains("17.4 GB"), "header total missing:\n{out}");
@@ -113,7 +113,7 @@ fn the_default_view_spans_every_category() {
     app.set_all_visible(true);
     assert_eq!(app.selected_count(), 3);
 
-    let out = draw(&mut app, 110, 30);
+    let out = draw(&app, 110, 30);
     assert!(
         out.contains("3 selected"),
         "footer selection missing:\n{out}"
@@ -126,8 +126,8 @@ fn the_default_view_spans_every_category() {
 
 #[test]
 fn header_breaks_the_total_down_by_risk() {
-    let mut app = fixture();
-    let out = draw(&mut app, 110, 30);
+    let app = fixture();
+    let out = draw(&app, 110, 30);
     // 17 GB safe, 420 MB rebuildable, and a zero-byte irreversible stash.
     assert!(out.contains("17.0 GB safe"), "risk split missing:\n{out}");
     assert!(
@@ -148,7 +148,7 @@ fn confirm_dialog_demands_typed_acknowledgement_for_irreversible_items() {
     assert_eq!(app.mode, Mode::Confirm);
     assert!(!app.confirm_satisfied(), "must not be armed by default");
 
-    let out = draw(&mut app, 110, 30);
+    let out = draw(&app, 110, 30);
     assert!(out.contains("cannot be recovered"), "no warning:\n{out}");
     assert!(out.contains("confirm (locked)"), "not gated:\n{out}");
 
@@ -179,17 +179,17 @@ fn survives_a_terminal_far_too_small_to_draw() {
     // Guards the width arithmetic in the panes and the centred overlays.
     let mut app = fixture();
     for (w, h) in [(20, 5), (10, 3), (1, 1), (40, 8)] {
-        draw(&mut app, w, h);
+        draw(&app, w, h);
     }
     app.set_all_visible(true);
     app.begin_confirm();
     for (w, h) in [(20, 5), (10, 3), (1, 1)] {
-        draw(&mut app, w, h);
+        draw(&app, w, h);
     }
     app.mode = Mode::Reaping;
-    draw(&mut app, 12, 4);
+    draw(&app, 12, 4);
     app.mode = Mode::Help;
-    draw(&mut app, 12, 4);
+    draw(&app, 12, 4);
 }
 
 #[test]
@@ -209,13 +209,13 @@ fn empty_state_renders_without_items() {
         opts,
         true,
         false,
-        Default::default(),
+        crate::config::Config::default(),
         PathBuf::from("/dev/null"),
     );
     app.pending.clear();
     app.items.clear();
     app.rebuild();
-    let out = draw(&mut app, 90, 20);
+    let out = draw(&app, 90, 20);
     assert!(out.contains("DRY RUN"), "dry-run banner missing:\n{out}");
 }
 
@@ -231,14 +231,14 @@ fn preview() {
         app.items[i].selected = true;
     }
     app.rebuild();
-    println!("\n{}\n", draw(&mut app, 104, 24));
+    println!("\n{}\n", draw(&app, 104, 24));
 }
 
 #[test]
 fn the_quick_reap_palette_shows_what_each_key_would_take() {
     let mut app = fixture();
     app.mode = Mode::Recipes;
-    let out = draw(&mut app, 104, 24);
+    let out = draw(&app, 104, 24);
 
     assert!(out.contains("Quick reap"), "palette missing:\n{out}");
     // The fixture holds one safe docker item of 17 GB, so the docker recipe
@@ -306,7 +306,7 @@ fn a_recipe_holding_irreversible_items_still_demands_the_typed_confirmation() {
 fn the_footer_says_when_a_newer_release_exists() {
     let mut app = fixture();
     app.update_available = Some("9.9.9".into());
-    let out = draw(&mut app, 110, 30);
+    let out = draw(&app, 110, 30);
 
     assert!(out.contains("update available"), "no notice:\n{out}");
     assert!(out.contains("9.9.9"), "no version:\n{out}");
@@ -321,7 +321,7 @@ fn the_update_notice_gives_way_to_the_keys_on_a_narrow_window() {
     let mut app = fixture();
     app.update_available = Some("9.9.9".into());
     for width in [40, 60] {
-        let out = draw(&mut app, width, 20);
+        let out = draw(&app, width, 20);
         assert!(
             !out.contains("update available"),
             "notice crowded out the keys at {width} columns:\n{out}"
@@ -335,7 +335,7 @@ fn the_update_notice_never_hides_the_selection() {
     let mut app = fixture();
     app.update_available = Some("9.9.9".into());
     app.set_all_visible(true);
-    let out = draw(&mut app, 110, 30);
+    let out = draw(&app, 110, 30);
 
     assert!(out.contains("3 selected"), "selection lost:\n{out}");
     assert!(out.contains("update available"), "notice lost:\n{out}");
@@ -348,14 +348,14 @@ fn preview_recipes() {
     let mut app = fixture();
     app.mode = Mode::Recipes;
     app.recipe_idx = 3;
-    println!("\n{}\n", draw(&mut app, 104, 20));
+    println!("\n{}\n", draw(&app, 104, 20));
 }
 
 #[test]
 fn the_guide_opens_on_the_first_thing_someone_needs() {
     let mut app = fixture();
     app.mode = Mode::Help;
-    let out = draw(&mut app, 100, 32);
+    let out = draw(&app, 100, 32);
 
     assert!(out.contains("Guide"), "no guide:\n{out}");
     assert!(
@@ -370,10 +370,10 @@ fn the_guide_opens_on_the_first_thing_someone_needs() {
 fn the_guide_scrolls_rather_than_stopping_at_one_screen() {
     let mut app = fixture();
     app.mode = Mode::Help;
-    let top = draw(&mut app, 100, 32);
+    let top = draw(&app, 100, 32);
 
     app.help_scroll = 500; // clamped to the end by the renderer
-    let further = draw(&mut app, 100, 32);
+    let further = draw(&app, 100, 32);
 
     assert_ne!(top, further, "scrolling changed nothing");
     // The key list lives at the bottom, so reaching it proves the whole
@@ -390,7 +390,7 @@ fn the_guide_and_the_command_line_say_the_same_thing() {
     // someone might read it.
     let mut app = fixture();
     app.mode = Mode::Help;
-    let rendered = draw(&mut app, 100, 40);
+    let rendered = draw(&app, 100, 40);
     let printed = crate::guide::plain();
 
     assert!(printed.contains("What you are looking at"));
@@ -410,7 +410,7 @@ fn the_guide_and_the_command_line_say_the_same_thing() {
 fn preview_guide() {
     let mut app = fixture();
     app.mode = Mode::Help;
-    println!("\n{}\n", draw(&mut app, 100, 32));
+    println!("\n{}\n", draw(&app, 100, 32));
 }
 
 /// `cargo test preview_update -- --ignored --nocapture`
@@ -419,7 +419,7 @@ fn preview_guide() {
 fn preview_update() {
     let mut app = fixture();
     app.update_available = Some("1.2.0".into());
-    println!("\n{}\n", draw(&mut app, 104, 14));
+    println!("\n{}\n", draw(&app, 104, 14));
 }
 
 /// `cargo test preview_confirm -- --ignored --nocapture`
@@ -433,5 +433,5 @@ fn preview_confirm() {
     }
     app.begin_confirm();
     app.confirm_input = "re".into();
-    println!("\n{}\n", draw(&mut app, 104, 22));
+    println!("\n{}\n", draw(&app, 104, 22));
 }
