@@ -152,6 +152,12 @@ volumes, reclaimable BuildKit cache, dangling networks.
 Images are sized by `UniqueSize` — the space that genuinely comes back — rather than
 the total, which is mostly layers shared with images you are keeping.
 
+Docker states its sizes as display strings, so this is the one scanner whose figures
+reap repeats rather than measures. A string it cannot read is reported as
+**unrecognised**, not as `0 B` — the item stays on the list, below the size floor or
+not, and says why it has no number. Zero is a claim about your disk; not knowing is a
+claim about reap, and only one of them is true when docker changes its output.
+
 </details>
 
 <details>
@@ -398,6 +404,9 @@ disk.
 cargo test
 cargo test specs::                            # behavioural specifications only
 cargo test preview -- --ignored --nocapture   # print a rendered frame
+
+# check the figures against the docker daemon on this machine
+cargo test daemon_on_this_machine -- --ignored --nocapture
 ```
 
 ### Specifications
@@ -425,6 +434,13 @@ Each scenario establishes its context through `given`, performs the act once in
 repositories with real remotes** and real directory trees rather than mocking
 them — whether a branch is recoverable turns on what a remote can actually
 reach, so a mock would only assert that the fixture agrees with itself.
+
+Docker is the exception, since a daemon cannot be built inside a test. Its
+fixture is **output captured from a real one**, sanitised of names but verbatim
+in shape and in every figure's spelling — which is the part that matters, as the
+sizes are parsed from display strings. The capture can only prove reap still
+reads the docker that produced it, so the cross-check above asks the live daemon
+instead.
 
 Where the unit tests beside the code check mechanics — path guards, ordering,
 glob matching — the specifications drive the real scanners and assert on what a

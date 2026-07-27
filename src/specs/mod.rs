@@ -20,4 +20,6 @@ mod given;
 
 mod for_artifact_detection;
 mod for_branch_prunability;
+mod for_docker_reclaim;
+mod for_size_reporting;
 mod for_worktree_prunability;

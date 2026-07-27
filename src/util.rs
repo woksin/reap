@@ -13,7 +13,11 @@ pub fn human(bytes: u64) -> String {
     }
     let mut val = bytes as f64;
     let mut unit = 0;
-    while val >= 1000.0 && unit < UNITS.len() - 1 {
+    // Step up while the figure would *print* as 1000 or more, not merely while
+    // it is. Values from 100 up are shown without decimals, so 999_999 rounds
+    // to "1000 kB" — four digits and a unit nobody would have chosen. Promoting
+    // at 999.5 renders it "1.00 MB" instead.
+    while val >= 999.5 && unit < UNITS.len() - 1 {
         val /= 1000.0;
         unit += 1;
     }

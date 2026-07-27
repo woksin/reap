@@ -84,34 +84,51 @@ struct BuildCache {
 
 /// Docker reports sizes as display strings ("1.637GB", "73.7kB", "0B").
 /// The daemon uses SI units here, so 1 GB is 1000^3.
-fn parse_size(s: &str) -> u64 {
-    let s = s.trim().trim_end_matches('*');
+///
+/// `None` means the string was not a size this understands, which is a
+/// different thing from zero. The distinction is the whole point: every figure
+/// reap shows for Docker comes through here, so quietly calling an
+/// unrecognised string 0 B would under-report each item — and hide the small
+/// items entirely, since they fall under `min_size` — on the day docker
+/// changes its output, with nothing anywhere saying so.
+pub(crate) fn parse_size(s: &str) -> Option<u64> {
+    // A trailing `*` marks a figure docker shares between records.
+    let s = s.trim().trim_end_matches('*').trim();
+    // Docker's own "not computed", e.g. a volume it did not measure.
     if s.is_empty() || s == "N/A" {
-        return 0;
+        return None;
     }
     let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
-    let Ok(num) = num.trim().parse::<f64>() else {
-        return 0;
-    };
+    let num = num.trim().parse::<f64>().ok()?;
+    if !num.is_finite() || num < 0.0 {
+        return None;
+    }
     let mult: f64 = match unit.trim() {
         "B" | "" => 1.0,
         "kB" | "KB" => 1e3,
         "MB" => 1e6,
         "GB" => 1e9,
         "TB" => 1e12,
+        "PB" => 1e15,
         "KiB" => 1024.0,
         "MiB" => 1024f64.powi(2),
         "GiB" => 1024f64.powi(3),
         "TiB" => 1024f64.powi(4),
-        _ => 1.0,
+        // Not a unit this version knows. Refusing to guess is what keeps the
+        // failure loud: multiplying by one would turn "192.4MB" into 192 bytes.
+        _ => return None,
     };
-    (num * mult) as u64
+    Some((num * mult) as u64)
 }
 
 /// Turn docker's "4 days ago" into a day count.
-fn parse_since(s: &str) -> Option<u64> {
+pub(crate) fn parse_since(s: &str) -> Option<u64> {
     let s = s.trim().trim_end_matches(" ago").trim();
+    // Docker's shortest bucket, and the only one phrased as a sentence.
+    if s.eq_ignore_ascii_case("less than a second") {
+        return Some(0);
+    }
     let mut parts = s.split_whitespace();
     let head = parts.next()?;
     let unit = parts.next().unwrap_or("");
@@ -149,16 +166,32 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         // Daemon down, or no permission. Silently contribute nothing.
         return;
     }
-    let Ok(df) = serde_json::from_slice::<Df>(&out.stdout) else {
+    candidates_from_df(&out.stdout, opts, tx);
+    networks(opts, tx);
+}
+
+/// Everything the scan derives from `docker system df -v --format '{{json .}}'`.
+///
+/// Split from `scan` so the specifications can drive it against output captured
+/// from a real daemon — the alternative being no coverage at all of the code
+/// that turns docker's numbers into the ones a user acts on.
+pub(crate) fn candidates_from_df(json: &[u8], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let Ok(df) = serde_json::from_slice::<Df>(json) else {
         return;
     };
 
     images(&df, opts, tx);
-    containers(&df, tx);
-    volumes(&df, tx);
-    build_cache(&df, tx);
-    networks(tx);
+    containers(&df, opts, tx);
+    volumes(&df, opts, tx);
+    build_cache(&df, opts, tx);
 }
+
+/// Shown in place of a figure docker stated in a form this version cannot read.
+///
+/// Saying so costs a line of detail and keeps the item visible; the alternative
+/// is a confident `0 B` that is wrong in the one direction that matters.
+const UNRECOGNISED: &str =
+    "size unrecognised — this version cannot read the figure docker reported";
 
 fn images(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     for img in &df.images {
@@ -173,6 +206,7 @@ fn images(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         // other images and stays put.
         let unique = parse_size(&img.unique_size);
         let total = parse_size(&img.size);
+        let unknown = unique.is_none();
 
         let (group, risk) = if dangling {
             ("dangling images", Risk::Safe)
@@ -194,18 +228,21 @@ fn images(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
             format!("{}:{}", img.repository, img.tag)
         };
 
-        let detail = format!(
-            "no containers · {} total, {} shared with other images",
-            human(total),
-            human(total.saturating_sub(unique))
-        );
+        let detail = match (unique, total) {
+            (Some(unique), Some(total)) => format!(
+                "no containers · {} total, {} shared with other images",
+                human(total),
+                human(total.saturating_sub(unique))
+            ),
+            _ => format!("no containers · {UNRECOGNISED}"),
+        };
 
         let cand = Candidate::new(
             Category::Docker,
             group,
             name,
             detail,
-            unique,
+            unique.unwrap_or(0),
             risk,
             Action::Run {
                 program: "docker".into(),
@@ -215,23 +252,31 @@ fn images(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         )
         .with_age(age);
 
-        if unique >= opts.min_size || dangling {
-            let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+        // An unreadable size cannot be compared against the floor, and
+        // dropping it there would hide the very item that proves something is
+        // wrong.
+        if unknown || dangling || unique.unwrap_or(0) >= opts.min_size {
+            super::emit(tx, opts, cand);
         }
     }
 }
 
-fn containers(df: &Df, tx: &Sender<ScanEvent>) {
+fn containers(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     for c in &df.containers {
         if c.state == "running" || c.state == "restarting" || c.state == "paused" {
             continue;
         }
+        let size = parse_size(&c.size);
+        let detail = format!("{} · {} · from {}", c.state, c.status, c.image);
         let cand = Candidate::new(
             Category::Docker,
             "stopped containers",
             c.names.clone(),
-            format!("{} · {} · from {}", c.state, c.status, c.image),
-            parse_size(&c.size),
+            match size {
+                Some(_) => detail,
+                None => format!("{detail} · {UNRECOGNISED}"),
+            },
+            size.unwrap_or(0),
             Risk::Caution,
             Action::Run {
                 program: "docker".into(),
@@ -240,11 +285,11 @@ fn containers(df: &Df, tx: &Sender<ScanEvent>) {
             },
         )
         .with_age(parse_since(&c.created_since));
-        let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+        super::emit(tx, opts, cand);
     }
 }
 
-fn volumes(df: &Df, tx: &Sender<ScanEvent>) {
+fn volumes(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     for v in &df.volumes {
         // Links counts containers holding the volume.
         if v.links.parse::<u32>().unwrap_or(0) > 0 {
@@ -267,13 +312,19 @@ fn volumes(df: &Df, tx: &Sender<ScanEvent>) {
             )
         };
 
+        let size = parse_size(&v.size);
+        let detail = match size {
+            Some(_) => detail,
+            None => format!("{detail} · {UNRECOGNISED}"),
+        };
+
         // Volumes are the one place real data hides, so they are never "safe".
         let cand = Candidate::new(
             Category::Docker,
             group,
             name,
             detail,
-            parse_size(&v.size),
+            size.unwrap_or(0),
             Risk::Danger,
             Action::Run {
                 program: "docker".into(),
@@ -281,11 +332,11 @@ fn volumes(df: &Df, tx: &Sender<ScanEvent>) {
                 cwd: None,
             },
         );
-        let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+        super::emit(tx, opts, cand);
     }
 }
 
-fn build_cache(df: &Df, tx: &Sender<ScanEvent>) {
+fn build_cache(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     // BuildKit records cannot be pruned individually by ID, so the whole
     // reclaimable set is offered as one item — which is also the single
     // biggest win on most machines.
@@ -297,8 +348,16 @@ fn build_cache(df: &Df, tx: &Sender<ScanEvent>) {
     if reclaimable.is_empty() {
         return;
     }
-    let total: u64 = reclaimable.iter().map(|b| parse_size(&b.size)).sum();
-    if total == 0 {
+    let total: u64 = reclaimable.iter().filter_map(|b| parse_size(&b.size)).sum();
+    let unreadable = reclaimable
+        .iter()
+        .filter(|b| parse_size(&b.size).is_none())
+        .count();
+    // Nothing to gain, and nothing suspicious about it — every record was read
+    // and every record was empty. An unreadable one is a different matter: it
+    // is the case where this group silently becomes 0 B, and on most machines
+    // it is the single biggest number on offer.
+    if total == 0 && unreadable == 0 {
         return;
     }
     let oldest = reclaimable
@@ -310,10 +369,16 @@ fn build_cache(df: &Df, tx: &Sender<ScanEvent>) {
         Category::Docker,
         "build cache",
         "BuildKit cache (all reclaimable)",
-        format!(
-            "{} unused layer records · rebuilds will be slower once, then re-cache",
-            reclaimable.len()
-        ),
+        match unreadable {
+            0 => format!(
+                "{} unused layer records · rebuilds will be slower once, then re-cache",
+                reclaimable.len()
+            ),
+            n => format!(
+                "{} unused layer records · {n} of them {UNRECOGNISED}, so this total is a floor",
+                reclaimable.len()
+            ),
+        },
         total,
         Risk::Safe,
         Action::Run {
@@ -328,10 +393,10 @@ fn build_cache(df: &Df, tx: &Sender<ScanEvent>) {
         },
     )
     .with_age(oldest);
-    let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+    super::emit(tx, opts, cand);
 }
 
-fn networks(tx: &Sender<ScanEvent>) {
+fn networks(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     let Ok(out) = Command::new("docker")
         .args([
             "network",
@@ -367,7 +432,7 @@ fn networks(tx: &Sender<ScanEvent>) {
             cwd: None,
         },
     );
-    let _ = tx.send(ScanEvent::Found(Box::new(cand)));
+    super::emit(tx, opts, cand);
 }
 
 fn short_id(id: &str) -> &str {

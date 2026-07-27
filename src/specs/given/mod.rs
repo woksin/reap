@@ -3,8 +3,10 @@
 //! Fixtures build real git repositories and real directory trees rather than
 //! mocking them. The behaviour under specification is largely *what git and the
 //! filesystem say*, so a mock would only assert that the fixture agrees with
-//! itself.
+//! itself. Where the real thing cannot be built inside a test — a docker
+//! daemon — the fixture is output captured from one.
 
+pub mod a_docker_daemon;
 pub mod a_project;
 pub mod a_repository;
 
