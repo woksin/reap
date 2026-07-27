@@ -39,6 +39,12 @@ First release.
   deleted out from under the `node_modules` trees hard-linked into it.
 - **Three risk levels**, gating deletion. Selecting anything irreversible locks
   the confirm button until you type `reap`; `s` selects everything except those.
+- **Quick-reap recipes**, on `R`. One key per standing decision — everything
+  safe, the branches already upstream, worktrees with nothing in them, docker
+  without the volumes — each showing what it would take before it is pressed. A
+  recipe only selects, and lands in the same confirm dialog as ticking by hand.
+  `[[recipe]]` in the config takes the same match patterns as `ignore`, and
+  reusing a built-in key overrides it.
 - **`--trash`**, which renames paths into the volume's trash instead of
   unlinking them — picking the right trash directory by device id, since a
   rename cannot cross filesystems. It reports a failure rather than falling back

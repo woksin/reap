@@ -1,20 +1,38 @@
 <div align="center">
 
-# reap
+<img src="assets/banner.svg" alt="reap — know what is safe to lose" width="820">
 
-**Find and prune the stale things eating your disk — and know which ones you can actually afford to lose.**
+<br>
 
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![ratatui](https://img.shields.io/badge/tui-ratatui%200.30-7dd3fc)](https://ratatui.rs)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#platforms)
 [![CI](https://github.com/woksin/reap/actions/workflows/ci.yml/badge.svg)](https://github.com/woksin/reap/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/woksin/reap?color=86efac)](https://github.com/woksin/reap/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-Git branches · worktrees · build artifacts · Docker · package manager caches
+**Find and prune the stale things eating your disk — and know which ones you can actually afford to lose.**
 
 </div>
 
 ---
+
+## Built for the age of agentic programming
+
+Agents changed how fast a machine fills up.
+
+A branch per idea. A worktree per agent, so three of them can build at once without
+tripping over each other. A container to check it against. A `node_modules` and a
+`target` inside every one of those worktrees, because each is a real checkout. Work that
+used to take a week of branches now takes an afternoon — and leaves the same debris
+behind, at ten times the rate.
+
+A month later there are two hundred branches, a dozen worktrees, and 80 GB you cannot
+account for. Some of it is genuinely finished. Some of it is the only copy of an
+afternoon's work. **They look identical**, and that is why the disk never gets cleaned:
+the cost of guessing wrong is worse than the disk being full.
+
+reap tells them apart.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -32,59 +50,56 @@ Git branches · worktrees · build artifacts · Docker · package manager caches
 │  ██████████████───────────────── ││   ~/Library/Caches/com.microsoft.VSCode.ShipIt · rebuil… │
 │ ▸ Caches (8)             16.8 GB ││ ○ mongo:latest                          3d    1.13 GB  ● │
 │  ██████████───────────────────── ││   no containers · 1.27 GB total, 142 MB shared with oth… │
-│                                  ││ ○ Core/bin                              5w    1.13 GB  ● │
-│                                  ││   ~/src/repos/cratis/Studio/Source/Core · untouched 5w … │
 ╰──────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ◉ 1 selected · frees 19.1 GB     space pick · a all · o sort:size · / find · d reap · ? help │
+│ ◉ 1 selected · frees 19.1 GB     R quick · space pick · a all · / find · d reap · ? help     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## Why
-
-Most disk cleaners tell you what is *big*. The hard question is what is **safe to
-delete**, and that is where they stop and you start guessing.
-
-reap answers it. A branch whose upstream was deleted might be a squash-merged PR
-whose work is entirely in `main` — or it might be the only copy of three days of
-work. Those look identical to `git branch --merged`. reap tells them apart.
+On a real machine this took **189 branches that all looked equally scary and reduced them
+to 10** that actually needed a decision.
 
 ## Install
 
-A binary from the [latest release](https://github.com/woksin/reap/releases/latest).
-Pick the line for your machine — the last word is the only difference:
+<table>
+<tr><td width="150"><b>Homebrew</b><br><sub>macOS · Linux</sub></td><td>
+
+```bash
+brew tap woksin/reap
+brew install reap
+```
+
+</td></tr>
+<tr><td><b>Binary</b><br><sub>no toolchain</sub></td><td>
 
 ```bash
 # macOS, Apple silicon
 curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-aarch64-apple-darwin.tar.gz | tar xz
-# macOS, Intel
-curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-x86_64-apple-darwin.tar.gz | tar xz
-# Linux, arm64
-curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-aarch64-unknown-linux-gnu.tar.gz | tar xz
 # Linux, x86_64
 curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-x86_64-unknown-linux-gnu.tar.gz | tar xz
 
 sudo mv reap /usr/local/bin/
 ```
 
-Each release carries a `SHA256SUMS` listing every asset, so a download can be
-checked before it is run. The macOS binaries are unsigned: fetched with `curl`
-they run as-is, but downloaded through a browser Gatekeeper will quarantine
-them, and `xattr -d com.apple.quarantine reap` clears it.
+Also built for `x86_64-apple-darwin` and `aarch64-unknown-linux-gnu` — swap the last part
+of the name. Every release carries a `SHA256SUMS`.
 
-Or build it:
+</td></tr>
+<tr><td><b>Cargo</b><br><sub>Rust 1.88+</sub></td><td>
 
 ```bash
 cargo install --git https://github.com/woksin/reap
 ```
 
-```bash
-git clone https://github.com/woksin/reap && cd reap
-cargo install --path .
-```
+</td></tr>
+</table>
 
-Needs Rust 1.88+ to build. `git` and `docker` are used if present and skipped if
-not.
+> [!NOTE]
+> The macOS binaries are unsigned. Fetched with `curl` they run as-is; downloaded through
+> a browser, Gatekeeper quarantines them and `xattr -d com.apple.quarantine reap` clears
+> it. Homebrew handles this for you.
+
+`git` and `docker` are used if present and skipped if not.
 
 ## Use
 
@@ -105,10 +120,60 @@ reap --write-config       # write a documented starter config
 With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
 `Developer`, `Projects`, `code`, `dev`, `work`, `git`.
 
+## `R` — one key for the decision you always make
+
+After the first couple of runs, the ticking is the same ticking. `R` opens the recipes:
+
+```
+╭ Quick reap ────────────────────────────────────────────────────────────╮
+│                                                                        │
+│   1  Everything safe                            412    18.2 GB         │
+│   2  Everything but the irreversible            451    46.4 GB         │
+│   3  Absolutely everything                      503    49.0 GB         │
+│ ▸ g  Git · branches already upstream            160     285 MB         │
+│   w  Git · worktrees with nothing in them         5     170 MB         │
+│   G  Git · everything it can spare              181     455 MB         │
+│   b  Build artifacts                             20    12.0 GB         │
+│   d  Docker · safe                               41    21.2 GB         │
+│   D  Docker · everything but the volumes         66    25.5 GB         │
+│   c  Caches                                       8    16.8 GB         │
+│                                                                        │
+│   merged and squash-merged · already in the integration branch         │
+│   a key runs it · ↑↓ move · enter run · esc back                       │
+╰────────────────────────────────────────────────────────────────────────╯
+```
+
+Every recipe shows what it would take **before** you press it, and the highlighted one
+says what it leaves behind.
+
+A recipe only *selects*. It drops you into the same confirm dialog as ticking by hand —
+same risk split, same typed acknowledgement when anything irreversible is in there. One
+key is a shortcut through the tedium, never through the safety.
+
+And they are yours to define:
+
+```toml
+[[recipe]]
+key = "n"
+name = "Node · every node_modules"
+detail = "pnpm install brings them all back"
+match = ["build artifacts/node_modules"]
+max_risk = "rebuildable"
+
+[[recipe]]
+key = "p"
+name = "This project only"
+match = ["~/work/big-monorepo/*"]
+max_risk = "rebuildable"
+```
+
+`match` takes the same patterns as `ignore`, so a pattern learned in one place works in
+the other. Reuse a built-in key and yours takes it over.
+
 ## The interesting part: git prunability
 
-Branches and worktrees are not merely listed. reap works out **what actually
-survives deleting them** and groups them by the answer.
+Branches and worktrees are not merely listed. reap works out **what actually survives
+deleting them** and groups them by the answer.
 
 ```
 ╭─ Categories ─────────────────────╮╭─ Git › unpushed branches ────────────────────────────────╮
@@ -122,7 +187,6 @@ survives deleting them** and groups them by the answer.
 │     prunable worktrees (5)   0 B ││   4 commits exist only here — upstream origin/fix/proxy… │
 │     pushed branches (15)     0 B ││ ○ Arc/fix/proxygen                     4mo          —  ▲ │
 │     squash-merged branches … 0 B ││   2 commits exist only here — never pushed anywhere      │
-│     unpushed branches (10)   0 B ││                                                          │
 ╰──────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 ```
 
@@ -134,18 +198,16 @@ survives deleting them** and groups them by the answer.
 | `unpushed branches` | commits exist in this clone and **nowhere else** | 🔴 irreversible |
 
 > [!NOTE]
-> The squash-merge case is why this matters. A squash-merged PR leaves a local branch
-> that `git branch --merged` calls unmerged and whose upstream is gone — it *looks*
-> dangerous while every line of its work is already in `main`. reap settles it with
-> `git cherry`, which compares patch ids and so sees through the rewritten SHAs.
-> Conversely, a branch whose upstream was deleted while it still holds local commits
-> is genuinely dangerous, and gets flagged rather than waved through.
+> The squash-merge case is why this matters, and it is the case a squash-merge workflow
+> creates constantly. A squash-merged PR leaves a local branch that `git branch --merged`
+> calls unmerged and whose upstream is gone — it *looks* dangerous while every line of its
+> work is already in `main`. reap settles it with `git cherry`, which compares patch ids
+> and so sees through the rewritten SHAs. Conversely, a branch whose upstream was deleted
+> while it still holds local commits is genuinely dangerous, and gets flagged rather than
+> waved through.
 
-On a real machine this took 189 branches that all looked equally scary and reduced
-them to **10** that actually needed a decision.
-
-Worktrees are judged on both axes that lose work: uncommitted files, and commits no
-remote can reach. One is only called safe to prune when both are zero.
+Worktrees are judged on both axes that lose work: uncommitted files, and commits no remote
+can reach. One is only called safe to prune when both are zero.
 
 ## What else it finds
 
@@ -158,8 +220,8 @@ remote can reach. One is only called safe to prune when both are zero.
 `__pycache__` and ~20 more.
 
 Each is reported only when a **sibling file proves what it is**: a `target` next to a
-`Cargo.toml`, a `bin` next to a `.csproj`. A directory that merely happens to be
-called `build` is left alone.
+`Cargo.toml`, a `bin` next to a `.csproj`. A directory that merely happens to be called
+`build` is left alone.
 
 </details>
 
@@ -171,14 +233,14 @@ called `build` is left alone.
 Images with no container, dangling images, stopped containers, unused and anonymous
 volumes, reclaimable BuildKit cache, dangling networks.
 
-Images are sized by `UniqueSize` — the space that genuinely comes back — rather than
-the total, which is mostly layers shared with images you are keeping.
+Images are sized by `UniqueSize` — the space that genuinely comes back — rather than the
+total, which is mostly layers shared with images you are keeping.
 
-Docker states its sizes as display strings, so this is the one scanner whose figures
-reap repeats rather than measures. A string it cannot read is reported as
-**unrecognised**, not as `0 B` — the item stays on the list, below the size floor or
-not, and says why it has no number. Zero is a claim about your disk; not knowing is a
-claim about reap, and only one of them is true when docker changes its output.
+Docker states its sizes as display strings, so this is the one scanner whose figures reap
+repeats rather than measures. A string it cannot read is reported as **unrecognised**, not
+as `0 B` — the item stays on the list and says why it has no number. Zero is a claim about
+your disk; not knowing is a claim about reap, and only one of them is true when docker
+changes its output.
 
 </details>
 
@@ -191,8 +253,8 @@ npm, pnpm, yarn, bun, NuGet, Maven, Gradle, cargo, Go, pip, uv, Homebrew, Xcode
 DerivedData and device support, Playwright and Puppeteer browsers — plus anything over
 200 MB in `~/Library/Caches` not already named.
 
-The pnpm store is hard-linked into every `node_modules` on the machine, so it is handed
-to `pnpm store prune` rather than deleted out from under them.
+The pnpm store is hard-linked into every `node_modules` on the machine, so it is handed to
+`pnpm store prune` rather than deleted out from under them.
 
 </details>
 
@@ -232,49 +294,45 @@ Beyond that:
 - A recursive delete **refuses** any path fewer than three components deep, `$HOME`
   itself, and the system directories — whatever the scanners produce.
 - **Linked worktrees share one object store** with their main worktree, so each set is
-  collapsed to a single repository. Otherwise every branch, stash and `gc` gets
-  reported once per checkout.
+  collapsed to a single repository. Otherwise every branch, stash and `gc` gets reported
+  once per checkout.
 - `git gc` runs **without** `--prune=now`. reap also deletes branches, and pruning
   immediately would throw away the reflog that makes those recoverable.
 - **Stashes are dropped highest-index-first**, because dropping `stash@{0}` renumbers
   everything below it.
-- Overlapping selections are removed **shallowest-first**, and anything already taken
-  by a parent is skipped rather than counted twice.
+- Overlapping selections are removed **shallowest-first**, and anything already taken by a
+  parent is skipped rather than counted twice.
 - A **locked** git worktree is never offered.
-- `esc` does not quit. Leaving a tool that deletes files should take a specific
-  keystroke.
+- `esc` does not quit. Leaving a tool that deletes files should take a specific keystroke.
 
 ### `--trash`
 
 With `--trash`, path removals are renamed into the volume's trash instead of unlinked,
-making them recoverable from Finder. macOS keeps a separate trash per volume —
-`~/.Trash` for the boot volume, `<mount>/.Trashes/<uid>` for the rest — and a rename
-cannot cross filesystems, so reap picks the directory by device id. Two APFS volumes
-sharing one container are still separate filesystems here.
+making them recoverable from Finder. macOS keeps a separate trash per volume — `~/.Trash`
+for the boot volume, `<mount>/.Trashes/<uid>` for the rest — and a rename cannot cross
+filesystems, so reap picks the directory by device id. Two APFS volumes sharing one
+container are still separate filesystems here.
 
 > [!WARNING]
-> Trashing frees **nothing** — the bytes sit there until the trash is emptied. reap
-> says so rather than claiming a win it did not deliver, and the report offers `e` to
-> permanently delete *only the entries that run created*, leaving anything you trashed
-> yourself alone.
+> Trashing frees **nothing** — the bytes sit there until the trash is emptied. reap says so
+> rather than claiming a win it did not deliver, and the report offers `e` to permanently
+> delete *only the entries that run created*, leaving anything you trashed yourself alone.
 
-If a path cannot be trashed, reap reports the failure rather than silently falling back
-to an unrecoverable delete.
+If a path cannot be trashed, reap reports the failure rather than silently falling back to
+an unrecoverable delete.
 
 ### Estimated vs actual
 
 Per-item figures are measured directory sizes, so the total is an *estimate*. The report
 also states what free space **actually** did, read from the filesystem before and after.
-The two differ when items were trashed, when something failed, or when sizes drifted
-since the scan.
-
+The two differ when items were trashed, when something failed, or when sizes drifted since
+the scan.
 
 ## Configuration
 
-Nothing reap knows is baked in. Which directories count as build output, which
-caches are worth offering, what never to descend into — all of it comes from
-`~/.config/reap/config.toml` (or `$XDG_CONFIG_HOME`), seeded with the built-in
-defaults.
+Nothing reap knows is baked in. Which directories count as build output, which caches are
+worth offering, what never to descend into, which key reaps what — all of it comes from
+`~/.config/reap/config.toml` (or `$XDG_CONFIG_HOME`), seeded with the built-in defaults.
 
 ```bash
 reap --write-config     # documented starter file
@@ -285,8 +343,8 @@ Command-line flags override the config, which overrides the defaults.
 ### Ignoring things
 
 Patterns match against a candidate's **path**, its **label**, and its
-**`category/group`**. `*` matches any run of characters, and a pattern with no
-wildcard also matches everything beneath it.
+**`category/group`**. `*` matches any run of characters, and a pattern with no wildcard
+also matches everything beneath it.
 
 ```toml
 ignore = [
@@ -297,8 +355,8 @@ ignore = [
 ]
 ```
 
-Pressing `x` on a candidate appends the right pattern and writes the file — a
-path when there is one, so the rule survives a rename, otherwise the group.
+Pressing `x` on a candidate appends the right pattern and writes the file — a path when
+there is one, so the rule survives a rename, otherwise the group.
 
 ### Adding rules
 
@@ -317,21 +375,21 @@ risk = "safe"
 prune = ["my-tool", "cache", "clean"]   # run this instead of deleting
 ```
 
-`evidence` is what keeps the artifact rules honest — without it, any directory
-sharing the name would match. These entries **add** to the built-ins; set
-`replace_builtin_artifacts` or `replace_builtin_caches` to use only your own.
+`evidence` is what keeps the artifact rules honest — without it, any directory sharing the
+name would match. These entries **add** to the built-ins; set `replace_builtin_artifacts`,
+`replace_builtin_caches` or `replace_builtin_recipes` to use only your own.
 
 > [!NOTE]
-> A malformed config is a fatal error, not a warning. Silently falling back to
-> defaults would quietly change which files this tool offers to delete.
+> A malformed config is a fatal error, not a warning. Silently falling back to defaults
+> would quietly change which files this tool offers to delete.
 
 ## Platforms
 
-macOS and Linux, tested on both in CI.
+macOS and Linux, tested on both in CI, built for arm64 and x86_64 on each.
 
-Rules naming a path a machine does not have simply do not apply, so one rule set
-covers both — the Xcode entries are inert on Linux, the `~/.cache/*` ones on
-macOS. The pieces that genuinely differ:
+Rules naming a path a machine does not have simply do not apply, so one rule set covers
+both — the Xcode entries are inert on Linux, the `~/.cache/*` ones on macOS. The pieces
+that genuinely differ:
 
 | | macOS | Linux |
 |---|---|---|
@@ -339,13 +397,25 @@ macOS. The pieces that genuinely differ:
 | Unnamed caches | `~/Library/Caches` | `$XDG_CACHE_HOME`, else `~/.cache` |
 | `i` reveals via | Finder | `xdg-open` |
 
-Windows is not supported — the tool leans on `df`, POSIX device ids and unix
-trash layouts throughout.
+### Windows
+
+Not supported — and deliberately not shipped as a binary that half-works.
+
+reap decides what is safe to delete using POSIX device ids, unix trash layouts and `df`,
+and the guards that refuse to recursively delete a system directory are written against
+unix paths. Most of that would *compile* for Windows, which is precisely the danger: a
+tool whose whole job is deleting files must not be left guessing at which paths are
+sacred. A real port means the Recycle Bin through `IFileOperation`, `GetDiskFreeSpaceEx`
+in place of `df`, `%LOCALAPPDATA%` cache rules, and path guards rewritten for drive
+letters and UNC paths.
+
+Until that exists, there is WSL, where reap runs as the Linux build it already is.
 
 ## Keys
 
 | Key | |
 |---|---|
+| `R` | **quick reap** — one key per standing decision |
 | `↑ ↓` / `j k` | move |
 | `← →` / `h l` | switch pane |
 | `tab` | toggle pane |
@@ -366,6 +436,9 @@ trash layouts throughout.
 | `?` | help |
 | `q` | quit |
 
+Selecting a whole group is `a` with that group highlighted in the sidebar — the item list
+is already narrowed to it.
+
 ## Reading the numbers
 
 The header carries the three figures worth knowing at a glance:
@@ -375,8 +448,8 @@ The header carries the three figures worth knowing at a glance:
 │ ● 18.5 GB safe   ● 56.8 GB rebuildable   ▲ 2.56 GB irreversible     164 GB free of 494 GB → 242 GB │
 ```
 
-The **risk split** answers "how much can I get back without thinking" — 18.5 GB here,
-no judgement required. The **disk line** projects where free space lands if you take
+The **risk split** answers "how much can I get back without thinking" — 18.5 GB here, no
+judgement required. The **disk line** projects where free space lands if you take
 everything; the confirm dialog narrows that to your actual selection.
 
 The tree opens on **Everything**, one cross-category list sorted biggest-first, so the
@@ -384,41 +457,40 @@ largest wins are visible without picking a category. The highlighted row swaps i
 description for the **exact command that will run**, so nothing is confirmed without its
 consequence visible.
 
+### Sizes
+
+Sizes are **SI** — 1 GB is 1000³ bytes — matching macOS and `docker system df`, so figures
+can be compared against those directly. This differs from `du -h`, which is 1024-based and
+reads about 7% smaller for the same bytes.
+
+Directory sizes are the sum of file lengths, not allocated blocks.
+
+The disk figure comes from the volume reap was launched in, and the projection adds the
+whole reclaimable total to it. That is right when everything found lives in one free-space
+pool — including several APFS volumes in a shared container, which report a common figure.
+It overstates the gain if your scan roots sit on a genuinely separate disk.
+
 ## Performance
 
 A full scan of ~900 candidates across 5 repositories, 189 branches, 633 artifact
 directories and Docker: **~3.4 s**.
 
-Everything that can be parallel is. Directory sizing fans out at every level, and
-deletion works the same way — the overlap analysis already identifies which selected
-paths are pairwise disjoint, and those are unlinked concurrently. Commands stay serial,
-because their order matters and they touch shared state.
+Everything that can be parallel is. Directory sizing fans out at every level, and deletion
+works the same way — the overlap analysis already identifies which selected paths are
+pairwise disjoint, and those are unlinked concurrently. Commands stay serial, because
+their order matters and they touch shared state.
 
-The scan used to take 11.8 s. Profiling said the cost was not sizing at all but the
-`git` process spawned per branch, run one repository after another; evaluating
-repositories concurrently took it to 3.4 s and cut system time from 29 s to 6 s.
+The scan used to take 11.8 s. Profiling said the cost was not sizing at all but the `git`
+process spawned per branch, run one repository after another; evaluating repositories
+concurrently took it to 3.4 s and cut system time from 29 s to 6 s.
 
 Measured sizes are cached in `~/.cache/reap/sizes.json` and reused while the directory's
 own mtime is unchanged and the reading is under a week old.
 
 > [!NOTE]
-> That mtime moves when direct children are added or removed, but **not** when a file
-> deep inside is rewritten — so a cached figure can lag reality. Hence the time limit,
-> and `--no-cache` to force a fresh measurement.
-
-## Sizes
-
-Sizes are **SI** — 1 GB is 1000³ bytes — matching macOS and `docker system df`, so
-figures can be compared against those directly. This differs from `du -h`, which is
-1024-based and reads about 7% smaller for the same bytes.
-
-Directory sizes are the sum of file lengths, not allocated blocks.
-
-The disk figure comes from the volume reap was launched in, and the projection adds the
-whole reclaimable total to it. That is right when everything found lives in one
-free-space pool — including several APFS volumes in a shared container, which report a
-common figure. It overstates the gain if your scan roots sit on a genuinely separate
-disk.
+> That mtime moves when direct children are added or removed, but **not** when a file deep
+> inside is rewritten — so a cached figure can lag reality. Hence the time limit, and
+> `--no-cache` to force a fresh measurement.
 
 ## Development
 
@@ -433,11 +505,10 @@ cargo test daemon_on_this_machine -- --ignored --nocapture
 
 ### Specifications
 
-Behaviour is specified separately from the unit tests, following the convention
-used across the Cratis and Ada codebases: `for_<subject>` names what is under
-specification, `when_<scenario>` names the situation, and each
-`should_<expectation>` observes exactly one thing — so a failure reads as a
-sentence and names precisely what broke.
+Behaviour is specified separately from the unit tests, following the convention used
+across the Cratis and Ada codebases: `for_<subject>` names what is under specification,
+`when_<scenario>` names the situation, and each `should_<expectation>` observes exactly one
+thing — so a failure reads as a sentence and names precisely what broke.
 
 ```
 for_branch_prunability
@@ -451,40 +522,35 @@ for_branch_prunability
     should_say_the_upstream_was_deleted_rather_than_that_it_lacks_the_commits
 ```
 
-Each scenario establishes its context through `given`, performs the act once in
-`BECAUSE`, and only observes thereafter. The fixtures build **real git
-repositories with real remotes** and real directory trees rather than mocking
-them — whether a branch is recoverable turns on what a remote can actually
-reach, so a mock would only assert that the fixture agrees with itself.
+Each scenario establishes its context through `given`, performs the act once in `BECAUSE`,
+and only observes thereafter. The fixtures build **real git repositories with real
+remotes** and real directory trees rather than mocking them — whether a branch is
+recoverable turns on what a remote can actually reach, so a mock would only assert that the
+fixture agrees with itself.
 
-Docker is the exception, since a daemon cannot be built inside a test. Its
-fixture is **output captured from a real one**, sanitised of names but verbatim
-in shape and in every figure's spelling — which is the part that matters, as the
-sizes are parsed from display strings. The capture can only prove reap still
-reads the docker that produced it, so the cross-check above asks the live daemon
-instead.
-
-Where the unit tests beside the code check mechanics — path guards, ordering,
-glob matching — the specifications drive the real scanners and assert on what a
-user would be shown: the group, the risk, the wording, and the exact command.
+Docker is the exception, since a daemon cannot be built inside a test. Its fixture is
+**output captured from a real one**, sanitised of names but verbatim in shape and in every
+figure's spelling — which is the part that matters, as the sizes are parsed from display
+strings. The capture can only prove reap still reads the docker that produced it, so the
+cross-check above asks the live daemon instead.
 
 ### Tests
 
-The UI is rendered through ratatui's `TestBackend` and asserted against the real
-cell buffer, including terminals far too small to draw. The deletion paths are
-covered directly: refusing broad paths, dry-run leaving the disk alone, trashing
-keeping contents recoverable, emptying refusing anything outside a trash, and
-overlapping selections counting their bytes once.
+The UI is rendered through ratatui's `TestBackend` and asserted against the real cell
+buffer, including terminals far too small to draw. The deletion paths are covered directly:
+refusing broad paths, dry-run leaving the disk alone, trashing keeping contents
+recoverable, emptying refusing anything outside a trash, and overlapping selections
+counting their bytes once.
 
 ### Releasing
 
-There is no version to bump. Label a pull request `major`, `minor` or `patch`,
-and merging it cuts the release: [cratis/release-action](https://github.com/cratis/release-action)
+There is no version to bump. Label a pull request `major`, `minor` or `patch`, and merging
+it cuts the release: [cratis/release-action](https://github.com/cratis/release-action)
 works out the next semantic version, tags it, and the
-[release workflow](.github/workflows/release.yml) builds and attaches binaries
-for all four platforms. The version is stamped into `Cargo.toml` at build time
-rather than committed, so `reap --version` reports the release it came from. A
-merge with none of those labels releases nothing.
+[release workflow](.github/workflows/release.yml) builds and attaches binaries for all four
+targets and pushes the Homebrew formula. The version is stamped into `Cargo.toml` at build
+time rather than committed, so `reap --version` reports the release it came from. A merge
+with none of those labels releases nothing.
 
 See [CHANGELOG.md](CHANGELOG.md).
 

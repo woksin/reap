@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="reap">
+  <title>reap</title>
+
+  <defs>
+    <!-- Nothing draws outside the tile, however far the sweep runs. -->
+    <clipPath id="tile">
+      <rect x="0" y="0" width="128" height="128" rx="27"/>
+    </clipPath>
+    <!-- Everything on the near side of the cut is what survives it. -->
+    <clipPath id="kept">
+      <path d="M 118 -8 Q 76 58 50 136 L -8 136 L -8 -8 Z"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)">
+    <rect x="0" y="0" width="128" height="128" fill="#0d1117"/>
+
+    <!-- The bars as they stand: what the disk is holding. -->
+    <g fill="#1c2430">
+      <rect x="18" y="29" width="86" height="13" rx="6.5"/>
+      <rect x="18" y="50" width="62" height="13" rx="6.5"/>
+      <rect x="18" y="71" width="92" height="13" rx="6.5"/>
+      <rect x="18" y="92" width="48" height="13" rx="6.5"/>
+    </g>
+
+    <!-- The same bars, cut. Only the surviving side carries colour, so the
+         mark says what the tool does rather than what it merely looks at. -->
+    <g clip-path="url(#kept)">
+      <rect x="18" y="29" width="86" height="13" rx="6.5" fill="#7dd3fc"/>
+      <rect x="18" y="50" width="62" height="13" rx="6.5" fill="#7ee7db"/>
+      <rect x="18" y="71" width="92" height="13" rx="6.5" fill="#86efac"/>
+      <rect x="18" y="92" width="48" height="13" rx="6.5" fill="#fcbf7a"/>
+    </g>
+
+    <!-- The blade's arc. Curved, not straight — a scythe, not a guillotine.
+         The dark stroke underneath is the gap the cut opens up. -->
+    <path d="M 118 -8 Q 76 58 50 136" fill="none" stroke="#0d1117" stroke-width="12" stroke-linecap="butt"/>
+    <path d="M 118 -8 Q 76 58 50 136" fill="none" stroke="#dcfce7" stroke-width="4" stroke-linecap="butt"/>
+  </g>
+
+  <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="26.25" fill="none" stroke="#21262d" stroke-width="1.5"/>
+</svg>
