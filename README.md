@@ -66,6 +66,7 @@ to 10** that actually needed a decision.
 
 ```bash
 brew tap woksin/reap
+brew trust woksin/reap   # Homebrew 6 gates third-party taps
 brew install reap
 ```
 
