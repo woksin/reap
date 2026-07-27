@@ -6,7 +6,7 @@
 
 use super::scratch;
 use crate::model::{Candidate, ScanEvent};
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 pub struct a_download_directory {
@@ -124,13 +124,35 @@ fn collect(rx: std::sync::mpsc::Receiver<ScanEvent>) -> Vec<Candidate> {
 ///
 /// The scanner's staleness rule reads mtime, so a fixture that wrote everything
 /// "now" could only ever specify the recent case.
-fn back_date(path: &PathBuf, age_days: u64) {
+fn back_date(path: &Path, age_days: u64) {
     if age_days == 0 {
         return;
     }
     let when = SystemTime::now() - Duration::from_secs(age_days * 86_400);
-    // A directory cannot be opened for writing, and does not need to be: the
-    // timestamp is set through the descriptor either way.
-    let file = std::fs::File::open(path).expect("the fixture's own path");
+    let file = open_to_set_times(path).expect("the fixture's own path");
     file.set_modified(when).expect("back-dating the fixture");
+}
+
+/// Open a file *or a directory* in a way that permits setting its timestamps.
+///
+/// The two platforms disagree about what that takes, and both refuse the
+/// other's answer. `futimens` works through a read-only descriptor, and a
+/// directory cannot be opened any other way on unix. Windows wants the
+/// attribute-write right named explicitly, and will not open a directory at all
+/// without backup semantics.
+#[cfg(unix)]
+fn open_to_set_times(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+#[cfg(windows)]
+fn open_to_set_times(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
 }
