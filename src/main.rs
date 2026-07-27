@@ -52,6 +52,29 @@ struct Cli {
     #[arg(long)]
     list: bool,
 
+    /// Print findings as JSON and exit. Machine-readable counterpart to --list.
+    #[arg(long)]
+    json: bool,
+
+    /// Reap without the interface, for cron and scripts. Prints the plan and
+    /// changes nothing unless --yes is also given.
+    #[arg(long)]
+    reap: bool,
+
+    /// The most dangerous thing --reap will take. [safe]
+    #[arg(long, value_name = "LEVEL", value_enum)]
+    risk: Option<RiskCeiling>,
+
+    /// Select what a quick-reap recipe would, by its key. Overrides --risk,
+    /// since a recipe carries its own ceiling.
+    #[arg(long, value_name = "KEY")]
+    recipe: Option<char>,
+
+    /// Actually carry out --reap. Without it, the plan is printed and nothing
+    /// is touched.
+    #[arg(long)]
+    yes: bool,
+
     /// Skip the Docker scan.
     #[arg(long)]
     no_docker: bool,
@@ -82,6 +105,27 @@ struct Cli {
     /// whatever the configuration file already lists.
     #[arg(long = "ignore", value_name = "PATTERN")]
     ignores: Vec<String>,
+}
+
+/// How far up the risk scale an unattended run is allowed to go.
+///
+/// Named for the config's vocabulary rather than the enum's, so one word means
+/// one thing across the flag, the file and the interface.
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum RiskCeiling {
+    Safe,
+    Rebuildable,
+    Irreversible,
+}
+
+impl From<RiskCeiling> for Risk {
+    fn from(c: RiskCeiling) -> Risk {
+        match c {
+            RiskCeiling::Safe => Risk::Safe,
+            RiskCeiling::Rebuildable => Risk::Caution,
+            RiskCeiling::Irreversible => Risk::Danger,
+        }
+    }
 }
 
 /// CLI arguments win over the configuration file, which wins over the defaults.
@@ -166,13 +210,26 @@ fn main() -> Result<()> {
         scan_home_strays: cli.paths.is_empty() && cfg.scan.roots.is_empty(),
     };
 
+    let trash = cli.trash || cfg.scan.trash == Some(true);
+
+    if cli.json {
+        let result = json_mode(opts);
+        sizes.save();
+        return result;
+    }
+
+    if cli.reap {
+        let result = reap_mode(opts, &cfg, &cli, trash);
+        sizes.save();
+        return result;
+    }
+
     if cli.list {
         let result = list_mode(opts);
         sizes.save();
         return result;
     }
 
-    let trash = cli.trash || cfg.scan.trash == Some(true);
     let mut terminal = ratatui::init();
     let result = run(
         &mut terminal,
@@ -181,6 +238,172 @@ fn main() -> Result<()> {
     ratatui::restore();
     sizes.save();
     result
+}
+
+/// Findings as JSON, for anything that wants to decide for itself.
+///
+/// The schema names risks and categories with the words the config and the
+/// interface use, so a script and a person are talking about the same thing.
+/// `bytes` is always present; `path` only when the action is a removal.
+fn json_mode(opts: ScanOpts) -> Result<()> {
+    let items = app::collect_headless(opts);
+
+    let entries: Vec<serde_json::Value> = items
+        .iter()
+        .map(|i| {
+            let mut entry = serde_json::json!({
+                "category": i.category.title().to_lowercase(),
+                "group": i.group,
+                "label": i.label,
+                "detail": i.detail,
+                "bytes": i.size,
+                "risk": i.risk.label(),
+                "age_days": i.age_days,
+                "command": i.action.describe(),
+            });
+            if let model::Action::Remove(path) = &i.action {
+                entry["path"] = serde_json::json!(path.to_string_lossy());
+            }
+            entry
+        })
+        .collect();
+
+    let by_risk: serde_json::Value = [Risk::Safe, Risk::Caution, Risk::Danger]
+        .iter()
+        .map(|r| {
+            let matching: Vec<_> = items.iter().filter(|i| i.risk == *r).collect();
+            (
+                r.label().to_string(),
+                serde_json::json!({
+                    "items": matching.len(),
+                    "bytes": matching.iter().map(|i| i.size).sum::<u64>(),
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+
+    let mut out = serde_json::json!({
+        "total_bytes": items.iter().map(|i| i.size).sum::<u64>(),
+        "items": entries.len(),
+        "by_risk": by_risk,
+        "findings": entries,
+    });
+    if let Some((free, capacity)) = util::disk_free(&std::env::current_dir()?) {
+        out["disk"] = serde_json::json!({ "free_bytes": free, "total_bytes": capacity });
+    }
+
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Reap without the interface: `reap --reap --risk safe --yes`, for cron.
+///
+/// The interface makes you look at what you selected and type a word for the
+/// irreversible. Neither is available here, so the deliberate act is the flags
+/// themselves — `--yes` to touch anything at all, and a `--risk` that has to be
+/// raised by hand past the safe default before work can be lost.
+fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Result<()> {
+    let items = app::collect_headless(opts);
+
+    let (chosen, how): (Vec<model::Candidate>, String) = match cli.recipe {
+        Some(key) => {
+            let recipes = recipes::compile(cfg);
+            let recipe = recipes
+                .iter()
+                .find(|r| r.key == key)
+                .ok_or_else(|| anyhow::anyhow!("no recipe bound to {key:?}"))?;
+            (
+                items.into_iter().filter(|i| recipe.covers(i)).collect(),
+                recipe.name.clone(),
+            )
+        }
+        None => {
+            let ceiling: Risk = cli.risk.unwrap_or(RiskCeiling::Safe).into();
+            (
+                items.into_iter().filter(|i| i.risk <= ceiling).collect(),
+                format!("everything up to {}", ceiling.label()),
+            )
+        }
+    };
+
+    let total: u64 = chosen.iter().map(|i| i.size).sum();
+    println!("{} — {} items, {}", how, chosen.len(), human(total));
+    for risk in [Risk::Safe, Risk::Caution, Risk::Danger] {
+        let matching: Vec<_> = chosen.iter().filter(|i| i.risk == risk).collect();
+        if matching.is_empty() {
+            continue;
+        }
+        println!(
+            "  {} {:<14} {:>10}   {} items",
+            risk.dot(),
+            risk.label(),
+            human(matching.iter().map(|i| i.size).sum::<u64>()),
+            matching.len()
+        );
+    }
+
+    if chosen.is_empty() {
+        return Ok(());
+    }
+    if !cli.yes {
+        println!("\nNothing was touched. Add --yes to carry this out.");
+        return Ok(());
+    }
+    if chosen.iter().any(|i| i.risk == Risk::Danger) {
+        // Said out loud even though the flags asked for it, because this is the
+        // one line in the output that a scrollback search will find later.
+        println!("\n▲ This includes work that exists nowhere else.");
+    }
+
+    let reap_opts = reaper::ReapOpts {
+        dry_run: cli.dry_run,
+        trash,
+    };
+    let log = std::sync::Mutex::new((0u64, 0usize, Vec::<String>::new()));
+    reaper::run_all(chosen, reap_opts, |report| {
+        if let Ok(mut log) = log.lock() {
+            if report.ok {
+                log.0 += report.freed;
+                log.1 += 1;
+            } else {
+                log.2.push(format!(
+                    "{}: {}",
+                    report.label,
+                    report.error.unwrap_or_default()
+                ));
+            }
+        }
+    });
+
+    let (freed, ok, failures) = log.into_inner().unwrap_or((0, 0, Vec::new()));
+    println!(
+        "\n{} {} · {ok} succeeded{}",
+        if cli.dry_run {
+            "Would free"
+        } else if trash {
+            "Moved to the trash:"
+        } else {
+            "Freed"
+        },
+        human(freed),
+        if failures.is_empty() {
+            String::new()
+        } else {
+            format!(", {} failed", failures.len())
+        }
+    );
+    for failure in &failures {
+        eprintln!("  ✗ {failure}");
+    }
+    if trash && !cli.dry_run {
+        println!("The space comes back when the trash is emptied.");
+    }
+    // A cron job that half-worked should say so through its exit status.
+    if !failures.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn list_mode(opts: ScanOpts) -> Result<()> {

@@ -45,6 +45,14 @@ First release.
   recipe only selects, and lands in the same confirm dialog as ticking by hand.
   `[[recipe]]` in the config takes the same match patterns as `ignore`, and
   reusing a built-in key overrides it.
+- **Headless operation** for cron and scripts: `--reap` with a `--risk`
+  ceiling or a `--recipe` key, printing the plan and changing nothing without
+  `--yes`, and exiting non-zero when anything failed. `--json` prints the same
+  findings as `--list` in a machine-readable form.
+- **Risk overrides.** `[[override]]` re-grades what reap thinks something costs,
+  matched the same way `ignore` is — because risk is what `s` and the recipes
+  select by, and the built-in judgement is only one person's. Ignoring still
+  beats re-grading.
 - **`--trash`**, which renames paths into the volume's trash instead of
   unlinking them — picking the right trash directory by device id, since a
   rename cannot cross filesystems. It reports a failure rather than falling back
