@@ -6,6 +6,7 @@ mod model;
 mod reaper;
 mod recipes;
 mod scan;
+mod settings;
 #[cfg(test)]
 mod specs;
 mod trash;
@@ -95,6 +96,10 @@ struct Cli {
     /// Skip the cache scan.
     #[arg(long)]
     no_caches: bool,
+
+    /// Skip the personal scan — downloads, installers, device backups.
+    #[arg(long)]
+    no_personal: bool,
 
     /// Move paths to the volume's trash instead of unlinking them. Recoverable,
     /// but space only comes back once the trash is emptied.
@@ -256,6 +261,7 @@ fn main() -> Result<()> {
         max_depth: resolve(cli.depth, cfg.scan.depth, 8),
         skip_docker: cli.no_docker || cfg.scan.docker == Some(false),
         skip_caches: cli.no_caches || cfg.scan.caches == Some(false),
+        skip_personal: cli.no_personal || cfg.scan.personal == Some(false),
         scan_home_strays: cli.paths.is_empty() && cfg.scan.roots.is_empty(),
     };
 
@@ -572,6 +578,26 @@ fn run(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
 
 /// Hand a keypress to whichever mode currently owns the screen.
 fn handle_key(app: &mut App, code: KeyCode) {
+    // Drawn over every screen, so it is dismissed before every screen's keys —
+    // and by any of them, since the one thing someone wants after reading a
+    // legend is to get back to what they were doing.
+    if app.legend {
+        app.legend = false;
+        return;
+    }
+    // Everywhere except the screens where a letter is being typed into
+    // something, which is the one place a shortcut must not steal it.
+    if code == KeyCode::Char('L')
+        && matches!(
+            app.mode,
+            Mode::Browsing | Mode::Recipes | Mode::Report | Mode::Settings
+        )
+        && !app.settings_editing()
+    {
+        app.legend = true;
+        return;
+    }
+
     match app.mode {
         Mode::Help => in_help(app, code),
         Mode::Search => in_search(app, code),
@@ -580,6 +606,11 @@ fn handle_key(app: &mut App, code: KeyCode) {
         Mode::Reaping => {}
         Mode::Report => in_report(app, code),
         Mode::Recipes => in_recipes(app, code),
+        // Two keyboards in one screen: while something is being typed every
+        // printable key belongs to the text, and only when it is not do the
+        // single-letter actions mean anything.
+        Mode::Settings if app.settings_editing() => in_settings_edit(app, code),
+        Mode::Settings => in_settings(app, code),
         Mode::Browsing => in_browsing(app, code),
     }
 }
@@ -668,9 +699,89 @@ fn in_recipes(app: &mut App, code: KeyCode) {
     }
 }
 
+/// The settings screen while a value is being typed into it.
+fn in_settings_edit(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => app.with_settings(|s, _| {
+            s.edit = None;
+            Some("cancelled".into())
+        }),
+        KeyCode::Enter => app.commit_settings_edit(),
+        KeyCode::Backspace => app.with_settings(|s, _| {
+            s.edit.as_mut()?.buffer.pop();
+            None
+        }),
+        KeyCode::Char(c) => app.with_settings(|s, _| {
+            s.edit.as_mut()?.buffer.push(c);
+            None
+        }),
+        _ => {}
+    }
+}
+
+/// The settings screen when nothing is being typed, so letters are actions.
+fn in_settings(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_settings(),
+        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Up | KeyCode::Char('k') => app.with_settings(|s, _| {
+            s.move_cursor(-1);
+            None
+        }),
+        KeyCode::Down | KeyCode::Char('j') => app.with_settings(|s, _| {
+            s.move_cursor(1);
+            None
+        }),
+        KeyCode::PageUp => app.with_settings(|s, _| {
+            s.move_cursor(-10);
+            None
+        }),
+        KeyCode::PageDown => app.with_settings(|s, _| {
+            s.move_cursor(10);
+            None
+        }),
+        // Further than any list is long; the cursor saturates at the ends.
+        KeyCode::Home => app.with_settings(|s, _| {
+            s.move_cursor(isize::MIN);
+            None
+        }),
+        KeyCode::End => app.with_settings(|s, _| {
+            s.move_cursor(isize::MAX);
+            None
+        }),
+        // One key for "do the obvious thing here", which is a different thing
+        // on a heading, a switch and an add row.
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            use crate::settings::Row;
+            // Taken by value: every branch below reaches back into `app`
+            // mutably, and a borrow of the row would still be alive.
+            match app.settings.as_ref().and_then(|s| s.current()).cloned() {
+                Some(Row::Heading(_)) => app.with_settings(|s, cfg| {
+                    s.toggle_section(cfg);
+                    None
+                }),
+                Some(Row::Add(_)) => app.with_settings(|s, _| s.begin_add()),
+                Some(Row::Setting(setting)) if setting.is_switch() => {
+                    app.change_settings(settings::Settings::toggle_switch);
+                }
+                Some(Row::Setting(_)) => app.with_settings(settings::Settings::begin_edit),
+                _ => {}
+            }
+        }
+        KeyCode::Char('e') => app.with_settings(settings::Settings::begin_edit),
+        KeyCode::Char('n') => app.with_settings(settings::Settings::begin_rename),
+        KeyCode::Char('a') => app.with_settings(|s, _| s.begin_add()),
+        KeyCode::Char('x') => app.change_settings(settings::Settings::toggle_off),
+        KeyCode::Char('g') => app.change_settings(settings::Settings::cycle_grade),
+        KeyCode::Char('d') => app.change_settings(settings::Settings::delete),
+        _ => {}
+    }
+}
+
 fn in_browsing(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('C') => app.open_settings(),
         // Esc backs out of things rather than quitting: leaving a tool that
         // deletes files should take a deliberate keystroke.
         KeyCode::Esc => {

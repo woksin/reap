@@ -61,19 +61,38 @@ impl Strategy {
     /// What to tell someone whose installation reap cannot drive.
     pub fn instructions(self) -> String {
         match self {
-            Self::Manual => format!(
-                "curl -fsSL https://github.com/{REPO}/releases/latest/download/reap-{}.tar.gz | tar xz\n\
-                 sudo mv reap {}",
+            // Written in the shell the platform actually has: a curl pipe into
+            // tar is not a thing anyone can paste into PowerShell. The Windows
+            // asset is the executable itself, so there is nothing to unpack.
+            Self::Manual if cfg!(windows) => format!(
+                "Invoke-WebRequest {}/reap-{}.exe -OutFile {}\\reap.exe",
+                latest_download_url(),
                 asset_name(),
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.display().to_string()))
-                    .unwrap_or_else(|| "/usr/local/bin".into()),
+                install_dir().unwrap_or_else(|| ".".into()),
+            ),
+            Self::Manual => format!(
+                "curl -fsSL {}/reap-{}.tar.gz | tar xz\n\
+                 sudo mv reap {}",
+                latest_download_url(),
+                asset_name(),
+                install_dir().unwrap_or_else(|| "/usr/local/bin".into()),
             ),
             Self::Homebrew => "brew update && brew upgrade reap".into(),
             Self::Cargo => "cargo install --git https://github.com/woksin/reap --force".into(),
         }
     }
+}
+
+fn latest_download_url() -> String {
+    format!("https://github.com/{REPO}/releases/latest/download")
+}
+
+/// The directory this copy of reap is sitting in, when that can be worked out.
+fn install_dir() -> Option<String> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|d| d.display().to_string())
 }
 
 /// The release asset this machine would want.
@@ -83,8 +102,19 @@ impl Strategy {
 pub fn asset_name() -> String {
     let os = match std::env::consts::OS {
         "macos" => "macos",
+        "windows" => "windows",
         _ => "linux",
     };
+    if os == "windows" {
+        return match std::env::consts::ARCH {
+            "x86" => "windows-x86".to_string(),
+            // Windows on ARM runs x64 binaries under emulation, and does it
+            // well enough that a directory walk is indistinguishable. Pointing
+            // an ARM machine at the x64 download is a working answer; a
+            // windows-arm64 asset that is not published is a 404.
+            _ => "windows-x86_64".to_string(),
+        };
+    }
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         other => other,
@@ -347,13 +377,35 @@ mod tests {
 
     #[test]
     fn the_asset_name_matches_something_the_release_actually_publishes() {
-        // Exactly the four the release workflow builds. Drift here sends
-        // someone to a 404 with no way to tell why.
+        // Exactly what the release workflow builds. Drift here sends someone to
+        // a 404 with no way to tell why.
         let asset = asset_name();
         assert!(
-            ["macos-arm64", "macos-x86_64", "linux-arm64", "linux-x86_64",]
-                .contains(&asset.as_str()),
+            [
+                "macos-arm64",
+                "macos-x86_64",
+                "linux-arm64",
+                "linux-x86_64",
+                "windows-x86_64",
+                "windows-x86",
+            ]
+            .contains(&asset.as_str()),
             "no release asset is published for {asset}"
         );
+    }
+
+    #[test]
+    fn a_manual_installation_is_told_to_update_itself_in_a_shell_it_has() {
+        // A curl pipe into tar is not something anyone can paste into
+        // PowerShell, and PowerShell is the only shell a fresh Windows has.
+        let text = Strategy::Manual.instructions();
+        if cfg!(windows) {
+            assert!(text.contains("Invoke-WebRequest"), "{text}");
+            assert!(text.contains(".exe"), "{text}");
+        } else {
+            assert!(text.contains("curl"), "{text}");
+            assert!(text.contains("tar"), "{text}");
+        }
+        assert!(text.contains(&asset_name()), "{text}");
     }
 }

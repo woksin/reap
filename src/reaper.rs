@@ -8,21 +8,45 @@ use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-/// Paths that must never be handed to a recursive delete, however we got here.
-fn is_forbidden(path: &Path) -> bool {
-    if !path.is_absolute() {
-        return true;
-    }
-    // `/`, `/Users`, `/Users/name` — anything this shallow is a mistake.
-    let depth = path.components().count();
-    if depth < 3 {
-        return true;
-    }
-    if let Some(home) = home_dir()
-        && path == home
-    {
-        return true;
-    }
+/// The shallowest path that could ever be a legitimate target.
+///
+/// Unix counts the root as one component, so `/Users/name` is three. Windows
+/// counts the drive and the root separately, so `C:\Users\name` is four — the
+/// same depth, one more component to say it in.
+#[cfg(windows)]
+const MIN_COMPONENTS: usize = 4;
+#[cfg(not(windows))]
+const MIN_COMPONENTS: usize = 3;
+
+/// Top-level Windows directories that belong to the system, not to anyone.
+///
+/// `Users` is deliberately absent: everything reap offers on Windows lives under
+/// a profile, and `C:\Users` itself is already too shallow to reach here.
+#[cfg(windows)]
+const WINDOWS_SYSTEM_ROOTS: &[&str] = &[
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "boot",
+];
+
+/// Is this path inside a top-level directory that belongs to the system?
+#[cfg(windows)]
+fn in_system_root(path: &Path) -> bool {
+    path.components()
+        .find_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .is_some_and(|first| WINDOWS_SYSTEM_ROOTS.contains(&first.as_str()))
+}
+
+#[cfg(not(windows))]
+fn in_system_root(path: &Path) -> bool {
     matches!(
         path.to_str().unwrap_or(""),
         "/" | "/usr"
@@ -43,6 +67,23 @@ fn is_forbidden(path: &Path) -> bool {
     )
 }
 
+/// Paths that must never be handed to a recursive delete, however we got here.
+fn is_forbidden(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    // `/`, `/Users`, `/Users/name` — anything this shallow is a mistake.
+    if path.components().count() < MIN_COMPONENTS {
+        return true;
+    }
+    if let Some(home) = home_dir()
+        && path == home
+    {
+        return true;
+    }
+    in_system_root(path)
+}
+
 #[derive(Clone, Copy)]
 pub struct ReapOpts {
     pub dry_run: bool,
@@ -54,7 +95,9 @@ pub struct ReapOpts {
 enum Outcome {
     Done,
     /// Moved to the trash; the bytes are still on disk until it is emptied.
-    Trashed(PathBuf),
+    /// `None` where the platform will not say where it put it — recoverable by
+    /// the user, but not something reap can offer to empty afterwards.
+    Trashed(Option<PathBuf>),
     /// Nothing to do — an ancestor already took it. Costs no space.
     Skipped,
     Failed(String),
@@ -158,7 +201,7 @@ pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sy
 fn report_for(cand: &Candidate, outcome: Outcome) -> Report {
     let (freed, ok, error, trashed) = match outcome {
         Outcome::Done => (cand.size, true, None, None),
-        Outcome::Trashed(dest) => (cand.size, true, None, Some(dest)),
+        Outcome::Trashed(dest) => (cand.size, true, None, dest),
         Outcome::Skipped => (0, true, None, None),
         Outcome::Failed(e) => (0, false, Some(e), None),
     };
@@ -316,11 +359,27 @@ mod tests {
         }
     }
 
+    /// An ordinary checkout, spelled the way the running platform spells one.
+    ///
+    /// A unix path is not absolute on Windows — it has no drive — so the
+    /// literal would be refused there for the wrong reason entirely, and the
+    /// specification would pass while proving nothing.
+    fn an_ordinary_target() -> &'static str {
+        if cfg!(windows) {
+            r"C:\Users\someone\code\app\node_modules"
+        } else {
+            "/Users/someone/code/app/node_modules"
+        }
+    }
+
+    /// A directory that exists on this platform and must never be deleted.
+    fn a_system_directory() -> &'static str {
+        if cfg!(windows) { r"C:\Windows" } else { "/usr" }
+    }
+
     #[test]
     fn allows_a_normal_nested_target() {
-        assert!(!is_forbidden(Path::new(
-            "/Users/someone/code/app/node_modules"
-        )));
+        assert!(!is_forbidden(Path::new(an_ordinary_target())));
     }
 
     #[test]
@@ -330,7 +389,10 @@ mod tests {
         assert!(!out[0].ok, "deleting / must not report success");
         assert_eq!(out[0].freed, 0);
         assert!(out[0].error.as_ref().unwrap().contains("too broad"));
-        assert!(Path::new("/usr").exists(), "filesystem must be untouched");
+        assert!(
+            Path::new(a_system_directory()).exists(),
+            "filesystem must be untouched"
+        );
     }
 
     #[test]
@@ -392,6 +454,46 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Trashing must never quietly become deleting.
+    ///
+    /// Windows hands the path to the shell, which recycles it and does not say
+    /// where it put it, so there is nothing for reap to read back — which is
+    /// why the recoverability specification below is unix-only. What holds on
+    /// every platform is this: either it was trashed and the original is gone,
+    /// or it failed and the original is still there. The outcome that must not
+    /// exist is a reported success over a path that was unlinked instead.
+    #[cfg(windows)]
+    #[test]
+    fn trashing_either_takes_it_or_leaves_it_where_it_was() {
+        let root = tmp("trash-win");
+        let target = root.join(format!("reap-win-{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"recoverable").unwrap();
+
+        let out = run(
+            vec![candidate("nm", 4096, &target)],
+            ReapOpts {
+                dry_run: false,
+                trash: true,
+            },
+        );
+
+        if out[0].ok {
+            assert!(!target.exists(), "it reported success and left the path");
+            // The shell keeps its own index of the bin, so reap is not in a
+            // position to offer to empty what it just put there.
+            assert!(out[0].trashed.is_none(), "nothing to hand back on Windows");
+        } else {
+            assert!(
+                target.exists(),
+                "it failed and deleted the path anyway, which is the one \
+                 outcome --trash exists to rule out"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn trashing_keeps_the_contents_recoverable() {
         let root = tmp("trash");

@@ -7,6 +7,7 @@
 //! daemon — the fixture is output captured from one.
 
 pub mod a_docker_daemon;
+pub mod a_download_directory;
 pub mod a_project;
 pub mod a_repository;
 
@@ -20,10 +21,14 @@ pub struct scratch {
 
 impl scratch {
     pub fn named(what: &str) -> Self {
-        // Nanoseconds keep parallel specs from colliding in the shared temp dir.
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
+        // A counter rather than the clock. `as_nanos` reports nanoseconds but
+        // does not advance in them, so two specs starting inside the same tick
+        // used to be handed the same directory — and each would then see the
+        // other's fixture as part of its own, which fails whichever of them
+        // counts what it found.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let path =
             std::env::temp_dir().join(format!("reap-spec-{what}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -81,6 +86,7 @@ pub fn scanning_everything(roots: Vec<PathBuf>) -> crate::scan::ScanOpts {
         max_depth: 8,
         skip_docker: true,
         skip_caches: true,
+        skip_personal: true,
         // Only the fixture's own tree, never the machine running the specs.
         scan_home_strays: false,
     }

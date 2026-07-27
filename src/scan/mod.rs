@@ -1,7 +1,9 @@
 pub mod artifacts;
+pub mod cache_rules;
 pub mod caches;
 pub mod docker;
 pub mod git;
+pub mod personal;
 
 use crate::model::{Category, ScanEvent};
 use std::path::{Path, PathBuf};
@@ -19,6 +21,8 @@ pub struct Rules {
     never_descend: Vec<String>,
     /// Report unnamed `~/Library/Caches` entries at least this large.
     pub library_cache_floor: u64,
+    /// Report entries in the download directory at least this large.
+    pub downloads_floor: u64,
 }
 
 impl Default for Rules {
@@ -39,7 +43,7 @@ impl Rules {
         let mut caches = if cfg.replace_builtin_caches {
             Vec::new()
         } else {
-            caches::builtin_rules()
+            cache_rules::builtin_rules()
         };
         caches.extend(cfg.caches.iter().cloned());
 
@@ -68,6 +72,17 @@ impl Rules {
                 .as_deref()
                 .and_then(crate::parse_size)
                 .unwrap_or(200 * 1_000_000),
+            // Higher than the general floor on purpose. Everything in the
+            // download directory is a judgement call the user has to make one
+            // at a time, so the list has to be short enough to actually read.
+            // As with the cache floor, an unreadable figure falls back to the
+            // documented default rather than to zero.
+            downloads_floor: cfg
+                .scan
+                .downloads_floor
+                .as_deref()
+                .and_then(crate::parse_size)
+                .unwrap_or(100 * 1_000_000),
         }
     }
 
@@ -106,6 +121,7 @@ pub struct ScanOpts {
     pub max_depth: usize,
     pub skip_docker: bool,
     pub skip_caches: bool,
+    pub skip_personal: bool,
     /// Also look for stray build output sitting directly in `$HOME`.
     ///
     /// Worth doing when scanning the default roots, but surprising when the
@@ -125,6 +141,7 @@ impl Default for ScanOpts {
             max_depth: 8,
             skip_docker: false,
             skip_caches: false,
+            skip_personal: false,
             scan_home_strays: true,
         }
     }
@@ -146,6 +163,10 @@ pub fn default_roots() -> Vec<PathBuf> {
         "dev",
         "work",
         "git",
+        // Where the Windows tooling puts checkouts by default: Visual Studio
+        // clones into `source/repos`, GitHub Desktop into `Documents/GitHub`.
+        "source/repos",
+        "Documents/GitHub",
     ]
     .iter()
     .map(|d| home.join(d))
@@ -153,10 +174,17 @@ pub fn default_roots() -> Vec<PathBuf> {
     .collect()
 }
 
+/// The user's home directory.
+///
+/// `HOME` on unix, `USERPROFILE` on Windows. Both are checked everywhere rather
+/// than behind a `cfg`, because `HOME` is set under Git Bash and MSYS and is the
+/// more specific answer when it is.
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
         .map(PathBuf::from)
-        .filter(|p| p.is_dir())
+        .find(|p| p.is_dir())
 }
 
 /// Kick off every scanner on its own thread so results stream into the UI.
@@ -192,11 +220,21 @@ pub fn spawn_all(opts: ScanOpts, tx: Sender<ScanEvent>) {
         });
     }
     {
+        let opts = opts.clone();
+        let tx = tx.clone();
         thread::spawn(move || {
             if !opts.skip_caches {
                 caches::scan(&opts, &tx);
             }
             let _ = tx.send(ScanEvent::Done(Category::Caches));
+        });
+    }
+    {
+        thread::spawn(move || {
+            if !opts.skip_personal {
+                personal::scan(&opts, &tx);
+            }
+            let _ = tx.send(ScanEvent::Done(Category::Personal));
         });
     }
 }
@@ -294,6 +332,13 @@ const BUILTIN_NEVER_DESCEND: &[&str] = &[
     ".Trash",
     "vendor",
     "Pods",
+    // Windows: an enormous tree of application state that holds no checkouts,
+    // and a recycle bin whose contents are already deleted.
+    "AppData",
+    "$RECYCLE.BIN",
+    "Windows",
+    "Program Files",
+    "Program Files (x86)",
 ];
 
 /// Send a candidate unless the user's ignore rules exclude it.

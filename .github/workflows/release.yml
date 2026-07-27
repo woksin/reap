@@ -74,6 +74,15 @@ jobs:
     if: needs.release.outputs.publish == 'true'
     needs: [release]
     runs-on: ${{ matrix.os }}
+
+    # Every step below is written once and runs on all three operating systems.
+    # The Windows runners default to PowerShell, which would make that untrue,
+    # so the whole job is pinned to bash — Git for Windows provides it, along
+    # with the perl and tar these steps use.
+    defaults:
+      run:
+        shell: bash
+
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +104,18 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             asset: linux-arm64
+          # Windows ships as the executable itself rather than an archive:
+          # there is no tar on a fresh Windows, and a .exe is a thing anyone
+          # can download and run. 32-bit is still published because plenty of
+          # machines that most need a disk cleaned are the old ones.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: windows-x86_64
+            exe: .exe
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            asset: windows-x86
+            exe: .exe
 
     steps:
       - name: Checkout code
@@ -129,14 +150,17 @@ jobs:
 
       # Checked rather than assumed: a cross-compiled binary that will not run
       # is worth finding here and not in an issue. The macOS x86_64 build is
-      # the one case that cannot be checked, since the runner is arm64.
+      # the one case that cannot be checked, since the runner is arm64 — the
+      # 32-bit Windows build can be, because 64-bit Windows runs it.
       - name: Check it runs
         if: matrix.target != 'x86_64-apple-darwin'
         env:
           VERSION: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
-          reported="$(./target/${{ matrix.target }}/release/reap --version)"
+          # `tr -d '\r'` so a carriage return from a Windows runner cannot fail
+          # a comparison against a binary that is perfectly fine.
+          reported="$(./target/${{ matrix.target }}/release/reap${{ matrix.exe }} --version | tr -d '\r')"
           echo "$reported"
           [ "$reported" = "reap $VERSION" ]
 
@@ -149,11 +173,32 @@ jobs:
       # what the README's install line can be. Which version a tarball holds is
       # on the release it hangs off, and in `reap --version`.
       - name: Package
+        env:
+          BUILT: target/${{ matrix.target }}/release/reap${{ matrix.exe }}
+          NAME: reap-${{ matrix.asset }}
         run: |
           set -euo pipefail
-          name="reap-${{ matrix.asset }}"
-          tar -czf "${name}.tar.gz" -C "target/${{ matrix.target }}/release" reap
-          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          if [ -n "${{ matrix.exe }}" ]; then
+            # Shipped bare. Wrapping it would only ask a Windows user to find
+            # something that unpacks tarballs before they can run anything.
+            cp "$BUILT" "${NAME}.exe"
+            asset="${NAME}.exe"
+          else
+            tar -czf "${NAME}.tar.gz" -C "$(dirname "$BUILT")" reap
+            asset="${NAME}.tar.gz"
+          fi
+          # `shasum` on macOS, `sha256sum` under Git for Windows and on Linux —
+          # and the two disagree on how to print the name, one of them marking
+          # binary mode with a `*`. Only the digest is read out of either, and
+          # the line is written here, so every SHA256SUMS entry has one shape
+          # whichever runner produced it.
+          if command -v shasum >/dev/null; then
+            digest="$(shasum -a 256 "$asset" | cut -d' ' -f1)"
+          else
+            digest="$(sha256sum "$asset" | cut -d' ' -f1)"
+          fi
+          printf '%s  %s\n' "$digest" "$asset" > "${asset}.sha256"
+          cat "${asset}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -161,7 +206,8 @@ jobs:
           name: reap-${{ matrix.asset }}
           path: |
             reap-*.tar.gz
-            reap-*.tar.gz.sha256
+            reap-*.exe
+            reap-*.sha256
 
   attach:
     name: Attach binaries to the release
@@ -179,8 +225,8 @@ jobs:
       - name: Collect the checksums into one file
         run: |
           set -euo pipefail
-          cat ./artifacts/*.sha256 | sed 's|.*/||' > ./artifacts/SHA256SUMS
-          rm -f ./artifacts/*.tar.gz.sha256
+          cat ./artifacts/*.sha256 > ./artifacts/SHA256SUMS
+          rm -f ./artifacts/*.sha256
           cat ./artifacts/SHA256SUMS
 
       - name: Upload release assets
@@ -189,6 +235,7 @@ jobs:
           tag_name: ${{ needs.release.outputs.tag }}
           files: |
             ./artifacts/*.tar.gz
+            ./artifacts/*.exe
             ./artifacts/SHA256SUMS
 
   homebrew:

@@ -21,6 +21,7 @@ fn fixture() -> App {
         max_depth: 1,
         skip_docker: true,
         skip_caches: true,
+        skip_personal: true,
         scan_home_strays: false,
     };
     let mut app = App::new(
@@ -203,6 +204,7 @@ fn empty_state_renders_without_items() {
         max_depth: 1,
         skip_docker: true,
         skip_caches: true,
+        skip_personal: true,
         scan_home_strays: false,
     };
     let mut app = App::new(
@@ -434,4 +436,212 @@ fn preview_confirm() {
     app.begin_confirm();
     app.confirm_input = "re".into();
     println!("\n{}\n", draw(&app, 104, 22));
+}
+
+// ---- the settings screen ------------------------------------------------
+
+/// The settings screen, opened, with a config that has something of its own in
+/// every section so each kind of row is exercised.
+fn settings_fixture() -> App {
+    use crate::config::{ArtifactRule, CacheRule, OverrideRule, RiskName};
+
+    let mut app = fixture();
+    app.config.scan.roots = vec!["~/work".into()];
+    app.config.scan.stale_days = Some(90);
+    app.config.scan.personal = Some(false);
+    app.config.ignore = vec!["*/vendor".into(), "~/Library/Caches/Firefox".into()];
+    app.config.caches.push(CacheRule {
+        path: "~/.cache/mine".into(),
+        group: "yours".into(),
+        label: "my own cache".into(),
+        detail: String::new(),
+        risk: RiskName::Rebuildable,
+        prune: vec![],
+    });
+    app.config.artifacts.push(ArtifactRule {
+        dir: "my-output".into(),
+        evidence: vec!["Makefile".into()],
+        regen: "make".into(),
+        risk: RiskName::Safe,
+    });
+    app.config.overrides.push(OverrideRule {
+        matches: vec!["~/.nuget/packages".into()],
+        risk: RiskName::Safe,
+    });
+
+    app.open_settings();
+    app
+}
+
+/// Expand every section, so the assertions below see all of them at once.
+fn expand_all(app: &mut App) {
+    app.with_settings(|s, cfg| {
+        s.expanded = crate::settings::Section::ALL.into_iter().collect();
+        s.rebuild(cfg);
+        None
+    });
+}
+
+#[test]
+fn the_settings_screen_shows_every_section() {
+    let app = settings_fixture();
+    let out = draw(&app, 118, 40);
+
+    assert!(out.contains("Configuration"), "no title:\n{out}");
+    for section in crate::settings::Section::ALL {
+        assert!(
+            out.contains(section.title()),
+            "missing section {}:\n{out}",
+            section.title()
+        );
+    }
+    // And where the changes are being written, which is the question someone
+    // arrives with when the config is not doing what they expected.
+    assert!(out.contains("/dev/null"), "no config path shown:\n{out}");
+}
+
+#[test]
+fn a_rule_says_where_it_came_from() {
+    let mut app = settings_fixture();
+    expand_all(&mut app);
+    let out = draw(&app, 118, 90);
+
+    assert!(out.contains("my own cache"), "user rule missing:\n{out}");
+    assert!(out.contains("built-in"), "no built-in marker:\n{out}");
+    assert!(out.contains("yours"), "no user marker:\n{out}");
+}
+
+#[test]
+fn a_rule_turned_off_is_shown_as_turned_off_rather_than_hidden() {
+    // Hiding it would make `x` a one-way door again: the whole reason this
+    // screen exists is that a decision you cannot see is one you cannot undo.
+    let mut app = settings_fixture();
+    expand_all(&mut app);
+    let out = draw(&app, 118, 90);
+
+    assert!(out.contains("Firefox cache"), "the rule vanished:\n{out}");
+    assert!(out.contains('✗'), "nothing marked off:\n{out}");
+}
+
+#[test]
+fn a_setting_shows_the_value_in_force_and_whether_it_was_chosen() {
+    let app = settings_fixture();
+    let out = draw(&app, 118, 40);
+
+    assert!(out.contains("90 days"), "chosen value missing:\n{out}");
+    // Untouched, so still showing reap's own answer.
+    assert!(out.contains("200MB"), "defaulted value missing:\n{out}");
+    assert!(
+        out.contains("off"),
+        "the switch turned off is not shown:\n{out}"
+    );
+}
+
+#[test]
+fn the_footer_offers_delete_on_your_own_rules_and_not_on_built_ins() {
+    use crate::settings::{Origin, Row};
+
+    // A footer that lists a key which cannot do anything here is worse than a
+    // shorter footer: it is a promise the next keystroke breaks.
+    let mut app = settings_fixture();
+    expand_all(&mut app);
+
+    let to_first = |app: &mut App, want: fn(&Row) -> bool| {
+        let index = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .position(want)
+            .expect("the fixture puts one of these on the screen");
+        app.with_settings(move |s, _| {
+            s.cursor = index;
+            None
+        });
+    };
+
+    to_first(&mut app, |r| matches!(r, Row::Cache(Origin::Yours, _)));
+    let out = draw(&app, 118, 90);
+    assert!(
+        out.contains("d delete"),
+        "no delete for a user rule:\n{out}"
+    );
+
+    to_first(&mut app, |r| matches!(r, Row::Cache(Origin::Builtin, _)));
+    let out = draw(&app, 118, 90);
+    assert!(
+        !out.contains("d delete"),
+        "delete offered on a built-in:\n{out}"
+    );
+    assert!(out.contains("x on/off"), "no way to turn it off:\n{out}");
+}
+
+#[test]
+fn typing_a_value_shows_what_is_being_typed_and_what_it_is_for() {
+    let mut app = settings_fixture();
+    app.with_settings(|s, cfg| {
+        s.cursor = s
+            .rows
+            .iter()
+            .position(|r| matches!(r, crate::settings::Row::Root(_)))
+            .unwrap();
+        s.begin_edit(cfg)
+    });
+    app.with_settings(|s, _| {
+        s.edit.as_mut()?.buffer.push_str("/oss");
+        None
+    });
+
+    let out = draw(&app, 118, 40);
+    assert!(out.contains("directory to search"), "no prompt:\n{out}");
+    assert!(out.contains("~/work/oss"), "the text is not shown:\n{out}");
+    assert!(out.contains("esc cancel"), "no way out shown:\n{out}");
+}
+
+#[test]
+fn the_legend_draws_over_whatever_is_underneath() {
+    // Its whole point is answering one question without losing your place.
+    let mut app = fixture();
+    app.legend = true;
+    let out = draw(&app, 110, 34);
+
+    assert!(out.contains("Legend"), "no legend:\n{out}");
+    assert!(out.contains("irreversible"), "risks not explained:\n{out}");
+    assert!(out.contains("selected"), "marks not explained:\n{out}");
+
+    // And over the settings screen too, not only the list.
+    let mut app = settings_fixture();
+    app.legend = true;
+    let out = draw(&app, 118, 40);
+    assert!(
+        out.contains("Legend"),
+        "legend missing over settings:\n{out}"
+    );
+}
+
+#[test]
+#[ignore = "prints the settings screen for eyeballing: cargo test show_settings -- --ignored --nocapture"]
+fn show_settings() {
+    let mut app = settings_fixture();
+    app.with_settings(|s, cfg| {
+        s.expanded.insert(crate::settings::Section::Caches);
+        s.rebuild(cfg);
+        s.cursor = s
+            .rows
+            .iter()
+            .position(|r| matches!(r, crate::settings::Row::Cache(_, _)))
+            .unwrap()
+            + 3;
+        None
+    });
+    println!("{}", draw(&app, 118, 44));
+}
+
+#[test]
+#[ignore = "prints the legend for eyeballing: cargo test show_legend -- --ignored --nocapture"]
+fn show_legend() {
+    let mut app = fixture();
+    app.legend = true;
+    println!("{}", draw(&app, 110, 26));
 }
