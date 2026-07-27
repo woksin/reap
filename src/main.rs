@@ -11,6 +11,7 @@ mod trash;
 mod ui;
 #[cfg(test)]
 mod ui_tests;
+mod update;
 mod util;
 
 use anyhow::Result;
@@ -27,6 +28,9 @@ use util::human;
 #[derive(Parser)]
 #[command(name = "reap", version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Directory to scan for repositories and build artifacts. Repeatable.
     /// Defaults to the usual suspects under $HOME.
     #[arg(short, long = "path", value_name = "DIR")]
@@ -107,6 +111,12 @@ struct Cli {
     ignores: Vec<String>,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Update reap to the latest release, using whatever installed it.
+    Update,
+}
+
 /// How far up the risk scale an unattended run is allowed to go.
 ///
 /// Named for the config's vocabulary rather than the enum's, so one word means
@@ -157,6 +167,10 @@ pub fn parse_size(s: &str) -> u64 {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Command::Update) = cli.command {
+        return update::run(env!("CARGO_PKG_VERSION"));
+    }
 
     let config_path = cli
         .config
@@ -399,6 +413,9 @@ fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Re
     if trash && !cli.dry_run {
         println!("The space comes back when the trash is emptied.");
     }
+    if let Some(notice) = update::notice(env!("CARGO_PKG_VERSION")) {
+        println!("{notice}");
+    }
     // A cron job that half-worked should say so through its exit status.
     if !failures.is_empty() {
         std::process::exit(1);
@@ -480,6 +497,9 @@ fn list_mode(opts: ScanOpts) -> Result<()> {
             human(capacity),
             human(free + total)
         );
+    }
+    if let Some(notice) = update::notice(env!("CARGO_PKG_VERSION")) {
+        println!("{notice}");
     }
     Ok(())
 }

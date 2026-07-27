@@ -102,6 +102,23 @@ cargo install --git https://github.com/woksin/reap
 
 `git` and `docker` are used if present and skipped if not.
 
+### Staying current
+
+```bash
+reap update
+```
+
+reap works out how it was installed from where its binary sits, and hands the job to
+whoever put it there — `brew upgrade reap`, or `cargo install --force`. A binary you
+placed by hand is left alone: it prints the two lines that would replace it rather than
+overwriting something in `/usr/local/bin` behind a `sudo` you did not ask for.
+
+The interface says so in the footer when a release is out. That check runs on its own
+thread, gives up after five seconds and remembers the answer for a day, so it is never
+the reason reap feels slow — and it stays quiet when there is no terminal to read it,
+so it cannot end up in a cron log or in `--json`. `REAP_NO_UPDATE_CHECK=1` turns it off
+entirely.
+
 ## Use
 
 ```bash

@@ -462,6 +462,33 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     // Drop hints rather than let them run under the border on a narrow window.
     let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
     let room = inner.saturating_sub(used + 2);
+    // Takes the hint slot rather than adding a line: worth saying, not worth a
+    // row of the window someone is reading. Dropped entirely when it will not
+    // fit, since the keys matter more than the news.
+    let update = app.update_available.as_ref().map(|latest| {
+        format!(
+            "update available {} → {latest} · reap update",
+            env!("CARGO_PKG_VERSION")
+        )
+    });
+    if app.mode != Mode::Search
+        && let Some(update) = update.filter(|u| u.chars().count() <= room)
+    {
+        let right = vec![
+            Span::styled(update, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ];
+        f.render_widget(
+            Paragraph::new(justify(left, right, inner)).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(DIM)),
+            ),
+            area,
+        );
+        return;
+    }
+
     let hints = if app.mode == Mode::Search {
         "type to filter · enter keep · esc clear".to_string()
     } else {

@@ -13,6 +13,16 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
+### Added
+
+- `reap update`, which works out how reap was installed from where its binary
+  sits and hands the job to whoever put it there — Homebrew or cargo. A binary
+  placed by hand gets instructions rather than being overwritten.
+- A footer notice when a newer release exists, checked on its own thread with a
+  five-second ceiling and remembered for a day. Silent when there is no
+  terminal to read it, so it stays out of cron logs and `--json`.
+  `REAP_NO_UPDATE_CHECK=1` disables it.
+
 ## [1.0.0]
 
 First release.

@@ -101,6 +101,10 @@ pub struct App {
     /// Cursor in the palette, so the highlighted recipe can explain itself.
     pub recipe_idx: usize,
 
+    /// A newer release, once the background check has found one.
+    pub update_available: Option<String>,
+    update_rx: Option<Receiver<String>>,
+
     pub opts: ScanOpts,
     scan_rx: Option<Receiver<ScanEvent>>,
     reap_rx: Option<Receiver<ReapEvent>>,
@@ -143,6 +147,18 @@ impl App {
                 .and_then(|d| crate::util::disk_free(&d)),
             recipes: crate::recipes::compile(&config),
             recipe_idx: 0,
+            update_available: None,
+            // Off the main thread and answered at most once a day, so a slow
+            // or unreachable network delays nothing and says nothing.
+            update_rx: {
+                let (tx, rx) = channel();
+                std::thread::spawn(move || {
+                    if let Some(latest) = crate::update::check(env!("CARGO_PKG_VERSION")) {
+                        let _ = tx.send(latest);
+                    }
+                });
+                Some(rx)
+            },
             config,
             config_path,
             opts,
@@ -173,6 +189,14 @@ impl App {
     /// Drain both worker channels. Returns true when something changed.
     pub fn poll(&mut self) -> bool {
         let mut dirty = false;
+
+        if let Some(rx) = &self.update_rx
+            && let Ok(latest) = rx.try_recv()
+        {
+            self.update_available = Some(latest);
+            self.update_rx = None;
+            dirty = true;
+        }
 
         if let Some(rx) = &self.scan_rx {
             // Bound the drain so a fast scanner cannot starve the render loop.
