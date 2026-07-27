@@ -14,6 +14,8 @@ pub struct Rules {
     pub artifacts: Vec<crate::config::ArtifactRule>,
     pub caches: Vec<crate::config::CacheRule>,
     pub ignore: crate::config::IgnoreSet,
+    /// Re-gradings the user asked for, in the order they wrote them.
+    overrides: Vec<(crate::config::IgnoreSet, crate::model::Risk)>,
     never_descend: Vec<String>,
     /// Report unnamed `~/Library/Caches` entries at least this large.
     pub library_cache_floor: u64,
@@ -51,6 +53,11 @@ impl Rules {
             artifacts,
             caches,
             ignore: crate::config::IgnoreSet::new(&cfg.ignore),
+            overrides: cfg
+                .overrides
+                .iter()
+                .map(|o| (crate::config::IgnoreSet::new(&o.matches), o.risk.into()))
+                .collect(),
             never_descend,
             library_cache_floor: cfg
                 .scan
@@ -65,6 +72,18 @@ impl Rules {
     /// expensive to traverse.
     pub fn is_never_descend(&self, name: &str) -> bool {
         self.never_descend.iter().any(|n| n == name)
+    }
+
+    /// The risk the user asked this candidate to carry, if they asked.
+    ///
+    /// The last matching rule wins, so a broad re-grading can be written first
+    /// and exceptions carved out of it afterwards — the order it reads in.
+    fn risk_override(&self, cand: &crate::model::Candidate) -> Option<crate::model::Risk> {
+        self.overrides
+            .iter()
+            .filter(|(set, _)| set.matches_candidate(cand))
+            .map(|(_, risk)| *risk)
+            .next_back()
     }
 }
 
@@ -279,9 +298,15 @@ const BUILTIN_NEVER_DESCEND: &[&str] = &[
 ///
 /// Every scanner goes through here, so a pattern cannot be honoured in one
 /// category and quietly missed in another.
-pub fn emit(tx: &Sender<ScanEvent>, opts: &ScanOpts, cand: crate::model::Candidate) {
+pub fn emit(tx: &Sender<ScanEvent>, opts: &ScanOpts, mut cand: crate::model::Candidate) {
     if opts.rules.ignore.matches_candidate(&cand) {
         return;
+    }
+    // Re-graded here rather than in each scanner, for the same reason ignoring
+    // is: a rule honoured in one category and quietly missed in another is
+    // worse than no rule.
+    if let Some(risk) = opts.rules.risk_override(&cand) {
+        cand.risk = risk;
     }
     let _ = tx.send(ScanEvent::Found(Box::new(cand)));
 }
@@ -384,6 +409,145 @@ mod tests {
             })
             .collect();
         assert_eq!(got, ["/work/project/keep-me"]);
+    }
+
+    #[test]
+    fn emit_regrades_candidates_an_override_names() {
+        use crate::model::{Action, Candidate, Category, Risk};
+        use std::sync::mpsc::channel;
+
+        let mut cfg = Config::default();
+        cfg.overrides.push(crate::config::OverrideRule {
+            matches: vec!["build artifacts/*".into()],
+            risk: RiskName::Safe,
+        });
+        let opts = ScanOpts {
+            rules: std::sync::Arc::new(Rules::from_config(&cfg)),
+            ..Default::default()
+        };
+
+        let (tx, rx) = channel();
+        let make = |cat, group: &str| {
+            Candidate::new(
+                cat,
+                group,
+                "x",
+                "",
+                1,
+                Risk::Caution,
+                Action::Remove(std::path::PathBuf::from("/work/project/x")),
+            )
+        };
+        emit(&tx, &opts, make(Category::Artifacts, "node_modules"));
+        emit(&tx, &opts, make(Category::Caches, "npm"));
+        drop(tx);
+
+        let got: Vec<(String, Risk)> = rx
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Found(c) => Some((c.group.clone(), c.risk)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("node_modules".to_string(), Risk::Safe),
+                // Untouched: the pattern named build artifacts, not caches.
+                ("npm".to_string(), Risk::Caution),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_last_matching_override_wins() {
+        // So a broad re-grading can be written first and exceptions carved out
+        // of it below, which is the order the file reads in.
+        use crate::model::{Action, Candidate, Category, Risk};
+        use std::sync::mpsc::channel;
+
+        let mut cfg = Config::default();
+        cfg.overrides.push(crate::config::OverrideRule {
+            matches: vec!["docker/*".into()],
+            risk: RiskName::Safe,
+        });
+        cfg.overrides.push(crate::config::OverrideRule {
+            matches: vec!["docker/unused volumes".into()],
+            risk: RiskName::Irreversible,
+        });
+        let opts = ScanOpts {
+            rules: std::sync::Arc::new(Rules::from_config(&cfg)),
+            ..Default::default()
+        };
+
+        let (tx, rx) = channel();
+        for group in ["build cache", "unused volumes"] {
+            emit(
+                &tx,
+                &opts,
+                Candidate::new(
+                    Category::Docker,
+                    group,
+                    "x",
+                    "",
+                    1,
+                    Risk::Caution,
+                    Action::Run {
+                        program: "docker".into(),
+                        args: vec![],
+                        cwd: None,
+                    },
+                ),
+            );
+        }
+        drop(tx);
+
+        let got: Vec<Risk> = rx
+            .iter()
+            .filter_map(|e| match e {
+                ScanEvent::Found(c) => Some(c.risk),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, [Risk::Safe, Risk::Danger]);
+    }
+
+    #[test]
+    fn an_override_cannot_resurrect_something_ignored() {
+        // Ignoring is a decision never to be offered this. Re-grading is about
+        // what it costs. The first must win, or `x` would stop meaning
+        // anything the moment a broad override existed.
+        use crate::model::{Action, Candidate, Category, Risk};
+        use std::sync::mpsc::channel;
+
+        let mut cfg = Config::default();
+        cfg.ignore.push("caches/*".into());
+        cfg.overrides.push(crate::config::OverrideRule {
+            matches: vec!["caches/*".into()],
+            risk: RiskName::Safe,
+        });
+        let opts = ScanOpts {
+            rules: std::sync::Arc::new(Rules::from_config(&cfg)),
+            ..Default::default()
+        };
+
+        let (tx, rx) = channel();
+        emit(
+            &tx,
+            &opts,
+            Candidate::new(
+                Category::Caches,
+                "npm",
+                "x",
+                "",
+                1,
+                Risk::Caution,
+                Action::Remove(std::path::PathBuf::from("/a/b/c")),
+            ),
+        );
+        drop(tx);
+
+        assert_eq!(rx.iter().count(), 0);
     }
 
     #[test]

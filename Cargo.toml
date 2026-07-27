@@ -1,6 +1,6 @@
 [package]
 name = "reap"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Interactive TUI for finding and pruning stale developer junk"
 license = "MIT"

@@ -14,9 +14,9 @@ name: Release
 # has a full-permission token, and the action finds the merged pull request from
 # the commit.
 #
-# The very first release has no predecessor to bump from, so cut it by hand:
-# run this workflow with an explicit `version` (0.1.0). Left at the 0.0.0
-# placeholder, the action releases nothing.
+# A run with no merged pull request behind it — or one carrying none of those
+# labels — releases nothing. To force a version by hand, run this workflow with
+# an explicit `version`; left at the 0.0.0 placeholder it stays a no-op.
 
 on:
   push:

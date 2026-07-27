@@ -13,7 +13,7 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
-## [0.1.0]
+## [1.0.0]
 
 First release.
 
@@ -45,6 +45,14 @@ First release.
   recipe only selects, and lands in the same confirm dialog as ticking by hand.
   `[[recipe]]` in the config takes the same match patterns as `ignore`, and
   reusing a built-in key overrides it.
+- **Headless operation** for cron and scripts: `--reap` with a `--risk`
+  ceiling or a `--recipe` key, printing the plan and changing nothing without
+  `--yes`, and exiting non-zero when anything failed. `--json` prints the same
+  findings as `--list` in a machine-readable form.
+- **Risk overrides.** `[[override]]` re-grades what reap thinks something costs,
+  matched the same way `ignore` is — because risk is what `s` and the recipes
+  select by, and the built-in judgement is only one person's. Ignoring still
+  beats re-grading.
 - **`--trash`**, which renames paths into the volume's trash instead of
   unlinking them — picking the right trash directory by device id, since a
   rename cannot cross filesystems. It reports a failure rather than falling back
@@ -66,5 +74,5 @@ First release.
 - A figure docker states in a form reap cannot read is reported as
   *unrecognised*, never as `0 B`.
 
-[Unreleased]: https://github.com/woksin/reap/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/woksin/reap/releases/tag/v0.1.0
+[Unreleased]: https://github.com/woksin/reap/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/woksin/reap/releases/tag/v1.0.0

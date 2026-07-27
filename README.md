@@ -120,6 +120,26 @@ reap --write-config       # write a documented starter config
 With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
 `Developer`, `Projects`, `code`, `dev`, `work`, `git`.
 
+### Without the interface
+
+```bash
+reap --json                              # findings as JSON, for anything that decides for itself
+reap --reap                              # print the plan and change nothing
+reap --reap --yes                        # take everything safe
+reap --reap --risk rebuildable --yes     # raise the ceiling
+reap --reap --recipe d --yes             # whatever the `d` recipe covers
+```
+
+`--reap` defaults to `--risk safe` and does nothing at all without `--yes`. The
+interface makes you look at the selection and type a word for the irreversible;
+neither exists here, so the deliberate act is the flags — `--yes` to touch
+anything, and a ceiling that has to be raised by hand before work can be lost.
+Failures come back as a non-zero exit, so a cron job that half-worked says so.
+
+```cron
+0 4 * * 1  /usr/local/bin/reap --reap --recipe d --yes >> ~/.local/state/reap.log 2>&1
+```
+
 ## `R` — one key for the decision you always make
 
 After the first couple of runs, the ticking is the same ticking. `R` opens the recipes:
@@ -378,6 +398,25 @@ prune = ["my-tool", "cache", "clean"]   # run this instead of deleting
 `evidence` is what keeps the artifact rules honest — without it, any directory sharing the
 name would match. These entries **add** to the built-ins; set `replace_builtin_artifacts`,
 `replace_builtin_caches` or `replace_builtin_recipes` to use only your own.
+
+### Disagreeing about what something costs
+
+The built-in risk levels are one person's judgement. A cache you re-download over a fast
+link is safe to you; a stopped container you are keeping to debug is not. Risk is what `s`
+and the recipes select by, so correcting it is what makes those keys fit rather than nearly
+fit.
+
+```toml
+[[override]]
+match = ["caches/*"]           # same patterns as `ignore`
+risk = "safe"
+
+[[override]]
+match = ["~/.cache/precious"]  # the last matching rule wins, so exceptions go below
+risk = "irreversible"
+```
+
+Ignoring beats re-grading: something you said never to offer stays unoffered.
 
 > [!NOTE]
 > A malformed config is a fatal error, not a warning. Silently falling back to defaults

@@ -43,6 +43,8 @@ pub struct Config {
     pub caches: Vec<CacheRule>,
     #[serde(rename = "recipe", skip_serializing_if = "Vec::is_empty")]
     pub recipes: Vec<RecipeRule>,
+    #[serde(rename = "override", skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<OverrideRule>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -103,6 +105,25 @@ pub struct CacheRule {
     /// bookkeeping — `["pnpm", "store", "prune"]`.
     #[serde(default)]
     pub prune: Vec<String>,
+}
+
+/// Re-grade what reap considers something to cost.
+///
+/// The built-in risk levels are one person's judgement about what is expensive
+/// to lose, and that judgement does not survive contact with everyone's setup.
+/// A cache someone re-downloads over a fast link is safe to them; a stopped
+/// container someone is keeping to debug is not. Since risk is what `s` and
+/// the recipes select by, being able to correct it is what makes those keys
+/// fit rather than nearly fit.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct OverrideRule {
+    /// What it applies to. Matched against the path, the label and
+    /// `category/group`, exactly as `ignore` is.
+    #[serde(rename = "match")]
+    pub matches: Vec<String>,
+    /// The risk to give it instead.
+    pub risk: RiskName,
 }
 
 /// A one-key selection: "everything docker can spare", "the branches that are
@@ -327,6 +348,26 @@ never_descend = [
 # detail = "re-downloaded on next run"
 # risk = "safe"
 # prune = ["my-tool", "cache", "clean"]
+
+# ---------------------------------------------------------------------------
+# Re-grade what something costs you
+# ---------------------------------------------------------------------------
+# The built-in risk levels are one person's judgement. A cache you re-download
+# over a fast link is safe to you; a stopped container you are keeping to debug
+# is not. Risk is what `s` and the recipes select by, so correcting it is what
+# makes those keys fit rather than nearly fit.
+#
+# `match` uses the same patterns as `ignore`. The last matching rule wins, so
+# write the broad one first and carve exceptions out below it. Ignoring beats
+# re-grading: something you said never to offer stays unoffered.
+#
+# [[override]]
+# match = ["caches/*"]
+# risk = "safe"
+#
+# [[override]]
+# match = ["~/.cache/precious"]
+# risk = "irreversible"
 
 # ---------------------------------------------------------------------------
 # Quick-reap recipes — the R key
@@ -606,6 +647,24 @@ mod template_tests {
         let cfg: Config = toml::from_str(TEMPLATE).expect("template must be valid TOML");
         assert!(cfg.ignore.is_empty());
         assert!(cfg.artifacts.is_empty());
+    }
+
+    #[test]
+    fn the_override_the_template_shows_is_one_that_works() {
+        let uncommented: String = TEMPLATE
+            .lines()
+            .skip_while(|l| !l.contains("[[override]]"))
+            // Stops at the rule that opens the next section, which is not TOML.
+            .take_while(|l| !l.starts_with("# ---"))
+            .map(|l| l.trim_start_matches("# ").trim_start_matches('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let cfg: Config =
+            toml::from_str(&uncommented).expect("the template's own override example must parse");
+        assert_eq!(cfg.overrides.len(), 2);
+        assert_eq!(cfg.overrides[0].risk, RiskName::Safe);
+        assert_eq!(cfg.overrides[1].risk, RiskName::Irreversible);
     }
 
     #[test]
