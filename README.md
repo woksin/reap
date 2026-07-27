@@ -6,12 +6,19 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![ratatui](https://img.shields.io/badge/tui-ratatui%200.30-7dd3fc)](https://ratatui.rs)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#platforms)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#platforms)
 [![CI](https://github.com/woksin/reap/actions/workflows/ci.yml/badge.svg)](https://github.com/woksin/reap/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/woksin/reap?color=86efac)](https://github.com/woksin/reap/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
 **Find and prune the stale things eating your disk — and know which ones you can actually afford to lose.**
+
+<br>
+
+<img src="assets/demo.gif" alt="reap scanning a machine, sorting 807 items into safe, rebuildable and irreversible, then reaping the safe tier" width="900">
+
+<sub>One real run on one real machine: 70.4 GB reclaimable, sorted by what it costs to lose it.<br>
+`f` narrows to the safe tier, `R` `1` takes all of it — 4.91 GB, none of it work.</sub>
 
 </div>
 
@@ -86,6 +93,17 @@ Also `reap-macos-x86_64` and `reap-linux-arm64` — swap the last part of the na
 release carries a `SHA256SUMS`.
 
 </td></tr>
+<tr><td><b>Windows</b><br><sub>no toolchain</sub></td><td>
+
+```powershell
+Invoke-WebRequest https://github.com/woksin/reap/releases/latest/download/reap-windows-x86_64.exe -OutFile reap.exe
+```
+
+Shipped as the executable itself — there is nothing to unpack. `reap-windows-x86.exe` is
+the 32-bit build; Windows on ARM runs the x86_64 one under emulation. Put it anywhere on
+your `PATH`.
+
+</td></tr>
 <tr><td><b>Cargo</b><br><sub>Rust 1.88+</sub></td><td>
 
 ```bash
@@ -108,7 +126,7 @@ cargo install --git https://github.com/woksin/reap
 reap guide
 ```
 
-The same walkthrough `?` shows inside the interface: what the four categories are, what
+The same walkthrough `?` shows inside the interface: what the five categories are, what
 the risk levels mean, how selection works, and what happens when you press `d`.
 
 ### Staying current
@@ -139,13 +157,22 @@ reap -p ~/work -p ~/oss   # scan specific directories
 reap --stale-days 90      # only call things stale after 90 days
 reap --min-size 100MB     # hide the small fry
 reap --no-docker          # skip the Docker scan
+reap --no-personal        # skip downloads, installers and device backups
 reap --no-cache           # re-measure everything instead of reusing sizes
 reap --ignore '*/vendor'  # skip anything matching, without editing the config
 reap --write-config       # write a documented starter config
 ```
 
 With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
-`Developer`, `Projects`, `code`, `dev`, `work`, `git`.
+`Developer`, `Projects`, `code`, `dev`, `work`, `git`, and the two the Windows tooling
+picks by default — `source/repos` and `Documents/GitHub`.
+
+Once you are in, `/` narrows the list as you type — across every category at once, so one
+query reaches build output, docker images and repositories together:
+
+<div align="center">
+<img src="assets/find.gif" alt="pressing / and typing to narrow hundreds of findings down to one project's worth" width="860">
+</div>
 
 ### Without the interface
 
@@ -184,6 +211,8 @@ After the first couple of runs, the ticking is the same ticking. `R` opens the r
 │   d  Docker · safe                               41    21.2 GB         │
 │   D  Docker · everything but the volumes         66    25.5 GB         │
 │   c  Caches                                       8    16.8 GB         │
+│   a  Apps · what they will simply rebuild        34    9.28 GB         │
+│   i  Installers you have already run              6    4.10 GB         │
 │                                                                        │
 │   merged and squash-merged · already in the integration branch         │
 │   a key runs it · ↑↓ move · enter run · esc back                       │
@@ -222,20 +251,12 @@ the other. Reuse a built-in key and yours takes it over.
 Branches and worktrees are not merely listed. reap works out **what actually survives
 deleting them** and groups them by the answer.
 
-```
-╭─ Categories ─────────────────────╮╭─ Git › unpushed branches ────────────────────────────────╮
-│   Everything (939)       80.6 GB ││ ○ Arc/blah                             4mo          —  ▲ │
-│  ─────────────────────────────── ││   $ git branch -D blah                                   │
-│ ▾ Git (200)               285 MB ││ ○ Arc/feat/chronicle-setup-diagnos…     3w          —  ▲ │
-│  ─────────────────────────────── ││   1 commits exist only here — upstream origin/feat/chro… │
-│     stale worktrees (1)   170 MB ││ ○ Arc/feature/command-scenario-uni…    3mo          —  ▲ │
-│     repacking (5)         115 MB ││   1 commits exist only here — never pushed anywhere      │
-│     merged branches (160)    0 B ││ ○ Arc/fix/proxy-and-readmodels         4mo          —  ▲ │
-│     prunable worktrees (5)   0 B ││   4 commits exist only here — upstream origin/fix/proxy… │
-│     pushed branches (15)     0 B ││ ○ Arc/fix/proxygen                     4mo          —  ▲ │
-│     squash-merged branches … 0 B ││   2 commits exist only here — never pushed anywhere      │
-╰──────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-```
+<div align="center">
+<img src="assets/git.gif" alt="expanding the Git category and stepping through stale worktrees, merged, pushed and unpushed branches" width="860">
+</div>
+
+<sub>Four groups, four different answers. The last one holds commits that exist in this
+clone and nowhere else, and every entry says how many and where the upstream went.</sub>
 
 | Group | Verdict | Risk |
 |---|---|---|
@@ -296,12 +317,59 @@ changes its output.
 
 <br>
 
-npm, pnpm, yarn, bun, NuGet, Maven, Gradle, cargo, Go, pip, uv, Homebrew, Xcode
-DerivedData and device support, Playwright and Puppeteer browsers — plus anything over
-200 MB in `~/Library/Caches` not already named.
+**Developer tools** — npm, pnpm, yarn, bun, NuGet, Maven, Gradle, cargo, Go, pip, uv,
+Homebrew, Xcode DerivedData and device support, Playwright and Puppeteer browsers.
+
+**Everything else on the machine** — Chrome, Firefox, Safari, Edge and Brave caches
+(never a profile: you stay signed in); Adobe's media cache, waveform and Camera Raw
+files, After Effects' disk cache, DaVinci Resolve's render cache, Blender; Spotify's
+stream cache and its offline downloads; Steam shader caches and part-downloads; Windows
+temporary files, crash dumps, shader caches and the Recycle Bin.
+
+**Every Electron app at once.** Slack, Discord, Teams, VS Code, Figma, Notion, Postman —
+each carries a Chromium, and each Chromium writes `Cache`, `Code Cache` and `GPUCache`
+into the app's own data directory, where no platform's cache sweep ever looks. reap walks
+`~/Library/Application Support`, `~/.config`, `%APPDATA%` and `%LOCALAPPDATA%` for those
+names exactly, and reports them grouped by the app that owns them.
+
+Plus anything over 200 MB in the platform's cache root that no rule already names — and
+if a rule names something *inside* one of those directories, reap steps around it rather
+than over it, so the same gigabytes are never offered twice under two different labels.
 
 The pnpm store is hard-linked into every `node_modules` on the machine, so it is handed to
-`pnpm store prune` rather than deleted out from under them.
+`pnpm store prune` rather than deleted out from under them. The Recycle Bin is emptied
+through the shell rather than unlinked, because it is indexed.
+
+</details>
+
+<details>
+<summary><b>Personal</b> — your own files, and an honest admission about them</summary>
+
+<br>
+
+Old downloads, installers, and phone backups.
+
+This is the one category where reap has no proof to work from. A `target` beside a
+`Cargo.toml` *is* build output; a branch whose patches are all in `main` *is* merged. But
+a 4 GB file in Downloads is either an installer for something you already installed or
+the only copy of a wedding video, and nothing in the filesystem tells those apart.
+
+So reap does not guess. Anything announcing itself as an installer — `.dmg`, `.exe`,
+`.pkg`, `.iso`, `.msi`, `.deb`, `.rpm` — is **rebuildable**, because the worst case is
+downloading it again. **Everything else is irreversible**, and that is a mechanism rather
+than a warning label: irreversible items are never taken by `s`, never by a safe recipe,
+never by an unattended `--reap`, and never without the word `reap` being typed.
+
+Device backups get the same treatment, and are named after the device rather than its
+identifier — `Sara's iPhone`, not `00008030-001C4D...` — because the question you are
+actually being asked is whether you still have that phone.
+
+Only the top level of the download directory, only what is older than `stale_days`, and
+only what is over `downloads_floor` (100 MB by default): every row here costs a judgement
+someone has to make one at a time, so a list long enough to skim past is a list that gets
+skipped whole.
+
+`--no-personal`, or `personal = false` under `[scan]`, turns the whole category off.
 
 </details>
 
@@ -319,22 +387,13 @@ dialog:
 Selecting anything irreversible **locks the confirm button until you type `reap`**.
 Press `s` to select everything *except* those.
 
-```
-╭ Confirm ─────────────────────────────────────────────────────╮
-│  Reaping 268 items · frees 49.0 GB                           │
-│                                                              │
-│    ● safe          177 items     18.2 GB                     │
-│    ● rebuildable    39 items     28.2 GB                     │
-│    ▲ irreversible   52 items     2.56 GB                     │
-│                                                              │
-│    free space  164 GB  →  213 GB                             │
-│                                                              │
-│  ▲ Some selected items cannot be recovered.                  │
-│    Type reap to confirm:  ▏                                  │
-│                                                              │
-│  enter confirm (locked)   esc cancel                         │
-╰──────────────────────────────────────────────────────────────╯
-```
+<div align="center">
+<img src="assets/gate.gif" alt="selecting absolutely everything; the confirm dialog turns red and refuses until the word reap is typed out" width="860">
+</div>
+
+<sub>`R` `3` selects absolutely everything. The dialog comes up red, `enter` reads **locked**,
+and it stays that way until the word is typed out — then this one backs out with `esc`
+instead. Recorded with `--dry-run`, which is why it says so.</sub>
 
 Beyond that:
 
@@ -451,31 +510,33 @@ Ignoring beats re-grading: something you said never to offer stays unoffered.
 
 ## Platforms
 
-macOS and Linux, tested on both in CI, built for arm64 and x86_64 on each.
+macOS, Linux and Windows, tested on all three in CI.
 
 Rules naming a path a machine does not have simply do not apply, so one rule set covers
-both — the Xcode entries are inert on Linux, the `~/.cache/*` ones on macOS. The pieces
-that genuinely differ:
+all of them — the Xcode entries are inert on Linux, the `~/.cache/*` ones on macOS, the
+`%LOCALAPPDATA%` ones anywhere that is not Windows. A cache rule's `path` takes `~` for
+your home directory and `%VARIABLE%` for an environment variable, which is the whole of
+the branching. The pieces that genuinely differ:
 
-| | macOS | Linux |
-|---|---|---|
-| Trash | `~/.Trash`, `<mount>/.Trashes/<uid>` | freedesktop `Trash/files` + `.trashinfo`, `<mount>/.Trash-<uid>` |
-| Unnamed caches | `~/Library/Caches` | `$XDG_CACHE_HOME`, else `~/.cache` |
-| `i` reveals via | Finder | `xdg-open` |
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Trash | `~/.Trash`, `<mount>/.Trashes/<uid>` | freedesktop `Trash/files` + `.trashinfo` | the shell's Recycle Bin |
+| Unnamed caches | `~/Library/Caches` | `$XDG_CACHE_HOME`, else `~/.cache` | — |
+| App data caches | `~/Library/Application Support` | `~/.config`, `~/.local/share` | `%APPDATA%`, `%LOCALAPPDATA%` |
+| Free space via | `df` | `df` | `GetDiskFreeSpaceExW` |
+| `i` reveals via | Finder | `xdg-open` | Explorer |
 
-### Windows
+The guards that refuse to recursively delete a system directory are written per platform
+rather than shared, because they are the one place a wrong answer is unrecoverable:
+`/usr`, `/System` and friends on unix; `C:\Windows`, `Program Files`, `ProgramData` and
+`$Recycle.Bin` on Windows, along with a depth floor that accounts for the drive letter
+being a component of its own.
 
-Not supported — and deliberately not shipped as a binary that half-works.
-
-reap decides what is safe to delete using POSIX device ids, unix trash layouts and `df`,
-and the guards that refuse to recursively delete a system directory are written against
-unix paths. Most of that would *compile* for Windows, which is precisely the danger: a
-tool whose whole job is deleting files must not be left guessing at which paths are
-sacred. A real port means the Recycle Bin through `IFileOperation`, `GetDiskFreeSpaceEx`
-in place of `df`, `%LOCALAPPDATA%` cache rules, and path guards rewritten for drive
-letters and UNC paths.
-
-Until that exists, there is WSL, where reap runs as the Linux build it already is.
+> [!NOTE]
+> On Windows, `--trash` hands each path to the shell, so what lands in the Recycle Bin is
+> restorable from it in the ordinary way. The shell does not report back where it put
+> anything, so reap cannot offer to empty afterwards what it just put there — the `e` key
+> on the report is macOS and Linux only.
 
 ## Keys
 
@@ -568,6 +629,16 @@ cargo test preview -- --ignored --nocapture   # print a rendered frame
 # check the figures against the docker daemon on this machine
 cargo test daemon_on_this_machine -- --ignored --nocapture
 ```
+
+The GIFs above are scripted, not screen-captured — every one of them re-renders from a
+`.tape` file with [vhs](https://github.com/charmbracelet/vhs):
+
+```bash
+cargo build --release && vhs assets/demo.tape
+```
+
+[`assets/RECORDING.md`](assets/RECORDING.md) covers how they were made and why each one
+earns its place.
 
 ### Specifications
 

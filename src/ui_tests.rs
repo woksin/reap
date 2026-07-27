@@ -21,6 +21,7 @@ fn fixture() -> App {
         max_depth: 1,
         skip_docker: true,
         skip_caches: true,
+        skip_personal: true,
         scan_home_strays: false,
     };
     let mut app = App::new(
@@ -203,6 +204,7 @@ fn empty_state_renders_without_items() {
         max_depth: 1,
         skip_docker: true,
         skip_caches: true,
+        skip_personal: true,
         scan_home_strays: false,
     };
     let mut app = App::new(

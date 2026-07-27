@@ -7,21 +7,45 @@ use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-/// Paths that must never be handed to a recursive delete, however we got here.
-fn is_forbidden(path: &Path) -> bool {
-    if !path.is_absolute() {
-        return true;
-    }
-    // `/`, `/Users`, `/Users/name` — anything this shallow is a mistake.
-    let depth = path.components().count();
-    if depth < 3 {
-        return true;
-    }
-    if let Some(home) = home_dir()
-        && path == home
-    {
-        return true;
-    }
+/// The shallowest path that could ever be a legitimate target.
+///
+/// Unix counts the root as one component, so `/Users/name` is three. Windows
+/// counts the drive and the root separately, so `C:\Users\name` is four — the
+/// same depth, one more component to say it in.
+#[cfg(windows)]
+const MIN_COMPONENTS: usize = 4;
+#[cfg(not(windows))]
+const MIN_COMPONENTS: usize = 3;
+
+/// Top-level Windows directories that belong to the system, not to anyone.
+///
+/// `Users` is deliberately absent: everything reap offers on Windows lives under
+/// a profile, and `C:\Users` itself is already too shallow to reach here.
+#[cfg(windows)]
+const WINDOWS_SYSTEM_ROOTS: &[&str] = &[
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "boot",
+];
+
+/// Is this path inside a top-level directory that belongs to the system?
+#[cfg(windows)]
+fn in_system_root(path: &Path) -> bool {
+    path.components()
+        .find_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .is_some_and(|first| WINDOWS_SYSTEM_ROOTS.contains(&first.as_str()))
+}
+
+#[cfg(not(windows))]
+fn in_system_root(path: &Path) -> bool {
     matches!(
         path.to_str().unwrap_or(""),
         "/" | "/usr"
@@ -42,6 +66,23 @@ fn is_forbidden(path: &Path) -> bool {
     )
 }
 
+/// Paths that must never be handed to a recursive delete, however we got here.
+fn is_forbidden(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    // `/`, `/Users`, `/Users/name` — anything this shallow is a mistake.
+    if path.components().count() < MIN_COMPONENTS {
+        return true;
+    }
+    if let Some(home) = home_dir()
+        && path == home
+    {
+        return true;
+    }
+    in_system_root(path)
+}
+
 #[derive(Clone, Copy)]
 pub struct ReapOpts {
     pub dry_run: bool,
@@ -53,7 +94,9 @@ pub struct ReapOpts {
 enum Outcome {
     Done,
     /// Moved to the trash; the bytes are still on disk until it is emptied.
-    Trashed(PathBuf),
+    /// `None` where the platform will not say where it put it — recoverable by
+    /// the user, but not something reap can offer to empty afterwards.
+    Trashed(Option<PathBuf>),
     /// Nothing to do — an ancestor already took it. Costs no space.
     Skipped,
     Failed(String),
@@ -157,7 +200,7 @@ pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sy
 fn report_for(cand: &Candidate, outcome: Outcome) -> Report {
     let (freed, ok, error, trashed) = match outcome {
         Outcome::Done => (cand.size, true, None, None),
-        Outcome::Trashed(dest) => (cand.size, true, None, Some(dest)),
+        Outcome::Trashed(dest) => (cand.size, true, None, dest),
         Outcome::Skipped => (0, true, None, None),
         Outcome::Failed(e) => (0, false, Some(e), None),
     };

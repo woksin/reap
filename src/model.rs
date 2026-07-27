@@ -7,14 +7,19 @@ pub enum Category {
     Artifacts,
     Docker,
     Caches,
+    /// Things that belong to the person rather than to the machine: downloads,
+    /// installers, device backups. Graded far more carefully than the rest,
+    /// because nothing here regenerates itself.
+    Personal,
 }
 
 impl Category {
-    pub const ALL: [Category; 4] = [
+    pub const ALL: [Category; 5] = [
         Category::Git,
         Category::Artifacts,
         Category::Docker,
         Category::Caches,
+        Category::Personal,
     ];
 
     pub fn title(self) -> &'static str {
@@ -23,6 +28,7 @@ impl Category {
             Category::Artifacts => "Build artifacts",
             Category::Docker => "Docker",
             Category::Caches => "Caches",
+            Category::Personal => "Personal",
         }
     }
 }

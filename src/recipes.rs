@@ -150,6 +150,31 @@ pub fn builtin() -> Vec<RecipeRule> {
             RiskName::Rebuildable,
             &["caches/*"],
         ),
+        // And the ones for a machine that is not primarily a build machine.
+        // `c` covers these too, but it also covers nine gigabytes of NuGet
+        // packages — which is the right answer for a developer and a
+        // bewildering one for anybody else.
+        r(
+            'a',
+            "Apps · what they will simply rebuild",
+            "chat, browsers, design tools · nothing you are signed into is lost",
+            RiskName::Safe,
+            &[
+                "caches/app caches",
+                "caches/application caches",
+                "caches/web browsers",
+                "caches/creative tools",
+                "caches/media apps",
+                "caches/system",
+            ],
+        ),
+        r(
+            'i',
+            "Installers you have already run",
+            "disk images and setup files · the apps they installed stay installed",
+            RiskName::Rebuildable,
+            &["personal/installers"],
+        ),
     ]
 }
 

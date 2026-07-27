@@ -574,18 +574,7 @@ impl App {
         match &self.items[i].action {
             crate::model::Action::Remove(path) => {
                 let shown = crate::util::tilde(path);
-                // Finder can select the entry itself; xdg-open only opens a
-                // directory, so it gets the parent.
-                let (program, args): (&str, Vec<std::ffi::OsString>) = if cfg!(target_os = "macos")
-                {
-                    ("open", vec!["-R".into(), path.into()])
-                } else {
-                    (
-                        "xdg-open",
-                        vec![path.parent().unwrap_or(path).as_os_str().to_owned()],
-                    )
-                };
-                match std::process::Command::new(program).args(args).spawn() {
+                match reveal(path) {
                     Ok(_) => self.status = format!("revealed {shown}"),
                     Err(e) => self.status = format!("could not reveal {shown}: {e}"),
                 }
@@ -695,6 +684,35 @@ impl App {
 
     pub fn reap_total(&self) -> usize {
         self.selected_count()
+    }
+}
+
+/// Show a path in the platform's file manager.
+///
+/// Finder and Explorer can highlight the entry itself; `xdg-open` only opens a
+/// directory, so on Linux it gets the parent.
+fn reveal(path: &std::path::Path) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+    }
+    #[cfg(windows)]
+    {
+        // `/select,<path>` has to reach Explorer as one argument it can parse
+        // itself; the standard quoting rules mangle it, so it is passed raw.
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(path))
+            .spawn()
     }
 }
 
