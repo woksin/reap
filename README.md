@@ -126,7 +126,7 @@ cargo install --git https://github.com/woksin/reap
 reap guide
 ```
 
-The same walkthrough `?` shows inside the interface: what the four categories are, what
+The same walkthrough `?` shows inside the interface: what the five categories are, what
 the risk levels mean, how selection works, and what happens when you press `d`.
 
 ### Staying current
@@ -157,13 +157,22 @@ reap -p ~/work -p ~/oss   # scan specific directories
 reap --stale-days 90      # only call things stale after 90 days
 reap --min-size 100MB     # hide the small fry
 reap --no-docker          # skip the Docker scan
+reap --no-personal        # skip downloads, installers and device backups
 reap --no-cache           # re-measure everything instead of reusing sizes
 reap --ignore '*/vendor'  # skip anything matching, without editing the config
 reap --write-config       # write a documented starter config
 ```
 
 With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
-`Developer`, `Projects`, `code`, `dev`, `work`, `git`.
+`Developer`, `Projects`, `code`, `dev`, `work`, `git`, and the two the Windows tooling
+picks by default — `source/repos` and `Documents/GitHub`.
+
+Once you are in, `/` narrows the list as you type — across every category at once, so one
+query reaches build output, docker images and repositories together:
+
+<div align="center">
+<img src="assets/find.gif" alt="pressing / and typing to narrow hundreds of findings down to one project's worth" width="860">
+</div>
 
 ### Without the interface
 
@@ -242,20 +251,12 @@ the other. Reuse a built-in key and yours takes it over.
 Branches and worktrees are not merely listed. reap works out **what actually survives
 deleting them** and groups them by the answer.
 
-```
-╭─ Categories ─────────────────────╮╭─ Git › unpushed branches ────────────────────────────────╮
-│   Everything (939)       80.6 GB ││ ○ Arc/blah                             4mo          —  ▲ │
-│  ─────────────────────────────── ││   $ git branch -D blah                                   │
-│ ▾ Git (200)               285 MB ││ ○ Arc/feat/chronicle-setup-diagnos…     3w          —  ▲ │
-│  ─────────────────────────────── ││   1 commits exist only here — upstream origin/feat/chro… │
-│     stale worktrees (1)   170 MB ││ ○ Arc/feature/command-scenario-uni…    3mo          —  ▲ │
-│     repacking (5)         115 MB ││   1 commits exist only here — never pushed anywhere      │
-│     merged branches (160)    0 B ││ ○ Arc/fix/proxy-and-readmodels         4mo          —  ▲ │
-│     prunable worktrees (5)   0 B ││   4 commits exist only here — upstream origin/fix/proxy… │
-│     pushed branches (15)     0 B ││ ○ Arc/fix/proxygen                     4mo          —  ▲ │
-│     squash-merged branches … 0 B ││   2 commits exist only here — never pushed anywhere      │
-╰──────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-```
+<div align="center">
+<img src="assets/git.gif" alt="expanding the Git category and stepping through stale worktrees, merged, pushed and unpushed branches" width="860">
+</div>
+
+<sub>Four groups, four different answers. The last one holds commits that exist in this
+clone and nowhere else, and every entry says how many and where the upstream went.</sub>
 
 | Group | Verdict | Risk |
 |---|---|---|
@@ -386,22 +387,13 @@ dialog:
 Selecting anything irreversible **locks the confirm button until you type `reap`**.
 Press `s` to select everything *except* those.
 
-```
-╭ Confirm ─────────────────────────────────────────────────────╮
-│  Reaping 268 items · frees 49.0 GB                           │
-│                                                              │
-│    ● safe          177 items     18.2 GB                     │
-│    ● rebuildable    39 items     28.2 GB                     │
-│    ▲ irreversible   52 items     2.56 GB                     │
-│                                                              │
-│    free space  164 GB  →  213 GB                             │
-│                                                              │
-│  ▲ Some selected items cannot be recovered.                  │
-│    Type reap to confirm:  ▏                                  │
-│                                                              │
-│  enter confirm (locked)   esc cancel                         │
-╰──────────────────────────────────────────────────────────────╯
-```
+<div align="center">
+<img src="assets/gate.gif" alt="selecting absolutely everything; the confirm dialog turns red and refuses until the word reap is typed out" width="860">
+</div>
+
+<sub>`R` `3` selects absolutely everything. The dialog comes up red, `enter` reads **locked**,
+and it stays that way until the word is typed out — then this one backs out with `esc`
+instead. Recorded with `--dry-run`, which is why it says so.</sub>
 
 Beyond that:
 
@@ -637,6 +629,16 @@ cargo test preview -- --ignored --nocapture   # print a rendered frame
 # check the figures against the docker daemon on this machine
 cargo test daemon_on_this_machine -- --ignored --nocapture
 ```
+
+The GIFs above are scripted, not screen-captured — every one of them re-renders from a
+`.tape` file with [vhs](https://github.com/charmbracelet/vhs):
+
+```bash
+cargo build --release && vhs assets/demo.tape
+```
+
+[`assets/RECORDING.md`](assets/RECORDING.md) covers how they were made and why each one
+earns its place.
 
 ### Specifications
 
