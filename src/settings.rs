@@ -728,7 +728,9 @@ fn apply_setting(cfg: &mut Config, setting: Setting, text: &str) -> Result<Strin
         if !text.starts_with(|c: char| c.is_ascii_digit()) {
             return Err(format!("{text:?} does not start with a number, e.g. 100MB"));
         }
-        if crate::parse_size(text) == 0 && text.trim_start_matches('0') != "" {
+        // A genuine zero is a legitimate floor; anything else reading as zero
+        // did not parse, and would silently widen the scan rather than narrow it.
+        if crate::parse_size(text) == 0 && !text.trim_start_matches('0').is_empty() {
             return Err(format!("{text:?} is not a size reap understands"));
         }
         Ok(text.to_string())
@@ -794,11 +796,11 @@ pub fn is_off(cfg: &Config, pattern: &str) -> bool {
 
 /// The risk a rule carries once any override the user wrote is applied.
 pub fn effective_risk(cfg: &Config, pattern: &str, declared: RiskName) -> (RiskName, bool) {
+    // The last matching rule wins, the same way the scanners resolve them.
     match cfg
         .overrides
         .iter()
-        .filter(|o| o.matches.iter().any(|m| m == pattern))
-        .next_back()
+        .rfind(|o| o.matches.iter().any(|m| m == pattern))
     {
         Some(o) => (o.risk, true),
         None => (declared, false),

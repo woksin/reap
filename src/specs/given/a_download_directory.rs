@@ -105,7 +105,7 @@ impl a_backup_directory {
     pub fn candidates(self) -> Vec<Candidate> {
         let opts = super::scanning_everything(vec![]);
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::scan::personal::device_backups(&[self.dir.path.clone()], &opts, &tx);
+        crate::scan::personal::device_backups(std::slice::from_ref(&self.dir.path), &opts, &tx);
         drop(tx);
         collect(rx)
     }

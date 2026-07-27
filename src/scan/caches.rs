@@ -30,7 +30,7 @@ fn app_data_roots(home: &std::path::Path) -> Vec<PathBuf> {
         roots.extend(
             ["APPDATA", "LOCALAPPDATA"]
                 .iter()
-                .filter_map(|v| std::env::var_os(v))
+                .filter_map(std::env::var_os)
                 .map(PathBuf::from),
         );
     } else {
@@ -327,7 +327,7 @@ fn collect_unnamed(dir: &std::path::Path, named: &[PathBuf], depth: usize, out: 
             continue;
         }
         let path = entry.path();
-        if named.iter().any(|n| *n == path) {
+        if named.contains(&path) {
             continue;
         }
         // Something named lives further in. Step past it so its siblings are
