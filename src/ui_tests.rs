@@ -302,6 +302,45 @@ fn a_recipe_holding_irreversible_items_still_demands_the_typed_confirmation() {
     );
 }
 
+#[test]
+fn the_footer_says_when_a_newer_release_exists() {
+    let mut app = fixture();
+    app.update_available = Some("9.9.9".into());
+    let out = draw(&mut app, 110, 30);
+
+    assert!(out.contains("update available"), "no notice:\n{out}");
+    assert!(out.contains("9.9.9"), "no version:\n{out}");
+    assert!(out.contains("reap update"), "no way to act on it:\n{out}");
+}
+
+#[test]
+fn the_update_notice_gives_way_to_the_keys_on_a_narrow_window() {
+    // The news is worth a line only when there is a line spare. Someone on an
+    // 80-column terminal needs to know how to quit more than they need to know
+    // a release happened.
+    let mut app = fixture();
+    app.update_available = Some("9.9.9".into());
+    for width in [40, 60] {
+        let out = draw(&mut app, width, 20);
+        assert!(
+            !out.contains("update available"),
+            "notice crowded out the keys at {width} columns:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn the_update_notice_never_hides_the_selection() {
+    // It takes the hint slot on the right, not the tally on the left.
+    let mut app = fixture();
+    app.update_available = Some("9.9.9".into());
+    app.set_all_visible(true);
+    let out = draw(&mut app, 110, 30);
+
+    assert!(out.contains("3 selected"), "selection lost:\n{out}");
+    assert!(out.contains("update available"), "notice lost:\n{out}");
+}
+
 /// `cargo test preview_recipes -- --ignored --nocapture`
 #[test]
 #[ignore = "visual aid, not an assertion"]
@@ -310,6 +349,15 @@ fn preview_recipes() {
     app.mode = Mode::Recipes;
     app.recipe_idx = 3;
     println!("\n{}\n", draw(&mut app, 104, 20));
+}
+
+/// `cargo test preview_update -- --ignored --nocapture`
+#[test]
+#[ignore = "visual aid, not an assertion"]
+fn preview_update() {
+    let mut app = fixture();
+    app.update_available = Some("1.2.0".into());
+    println!("\n{}\n", draw(&mut app, 104, 14));
 }
 
 /// `cargo test preview_confirm -- --ignored --nocapture`

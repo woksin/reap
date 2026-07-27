@@ -28,11 +28,16 @@ pub struct SizeCache {
     dirty: Mutex<bool>,
 }
 
-fn cache_path() -> Option<PathBuf> {
+/// Where reap keeps things it can afford to lose.
+pub fn cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| crate::scan::home_dir().map(|h| h.join(".cache")))?;
-    Some(base.join("reap").join("sizes.json"))
+    Some(base.join("reap"))
+}
+
+fn cache_path() -> Option<PathBuf> {
+    cache_dir().map(|d| d.join("sizes.json"))
 }
 
 /// Directory mtime in nanoseconds.
