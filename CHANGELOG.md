@@ -22,6 +22,13 @@ on each tag are the generated list of pull requests.
   five-second ceiling and remembered for a day. Silent when there is no
   terminal to read it, so it stays out of cron logs and `--json`.
   `REAP_NO_UPDATE_CHECK=1` disables it.
+- `reap guide` and a scrollable `?` in the interface, both rendered from one
+  source so the explanation cannot drift between them.
+
+### Changed
+
+- Release assets are named for the machine rather than the Rust target triple:
+  `reap-macos-arm64.tar.gz` instead of `reap-aarch64-apple-darwin.tar.gz`.
 
 ## [1.0.0]
 

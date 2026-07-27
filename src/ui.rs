@@ -113,7 +113,7 @@ pub fn render(f: &mut Frame, app: &mut App, tick: u64) {
         Mode::Confirm => render_confirm(f, app),
         Mode::Reaping => render_reaping(f, app),
         Mode::Report => render_report(f, app),
-        Mode::Help => render_help(f),
+        Mode::Help => render_help(f, app),
         Mode::Recipes => render_recipes(f, app),
         _ => {}
     }
@@ -919,57 +919,75 @@ fn render_recipes(f: &mut Frame, app: &App) {
     );
 }
 
-const KEYS: &[(&str, &str)] = &[
-    ("R", "quick reap — one key per standing decision"),
-    ("↑ ↓  j k", "move"),
-    ("← →  h l", "switch pane"),
-    ("tab", "toggle pane"),
-    ("enter", "expand / collapse a category"),
-    ("space", "select item"),
-    ("a", "select everything in view"),
-    ("s", "select all except irreversible"),
-    ("n", "clear the whole selection"),
-    ("v", "start a range, v again to select to the cursor"),
-    ("o", "cycle sort: size, age, name"),
-    ("f", "cycle risk filter"),
-    ("/", "filter by text"),
-    ("i", "reveal the path in the file manager"),
-    ("x", "never offer this again (writes the config)"),
-    ("d", "reap the selection"),
-    ("r", "rescan"),
-    ("esc", "clear the filter, then the selection"),
-    ("?", "this help"),
-    ("q", "quit"),
-];
-
-fn render_help(f: &mut Frame) {
-    let area = centered(56, (KEYS.len() + 4) as u16, f.area());
+fn render_help(f: &mut Frame, app: &App) {
+    // Nearly the whole window: this is a document, and a document in a small
+    // box is a document nobody reads.
+    let area = centered(80, f.area().height.saturating_sub(2), f.area());
     f.render_widget(Clear, area);
 
-    let mut lines = vec![Line::from("")];
-    for (key, desc) in KEYS {
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for section in crate::guide::GUIDE {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", section.title),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        for body in section.body {
+            lines.push(Line::from(Span::styled(
+                format!("  {body}"),
+                Style::new().fg(Color::Rgb(200, 205, 215)),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  Keys",
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    for (key, description) in crate::guide::KEYS {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("   {key:<12}"),
                 Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(desc.to_string(), Style::new().fg(Color::Rgb(200, 205, 215))),
+            Span::styled(
+                description.to_string(),
+                Style::new().fg(Color::Rgb(200, 205, 215)),
+            ),
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "   ● safe   ● rebuildable   ▲ irreversible",
-        Style::new().fg(DIM),
-    )));
+
+    // Clamped here rather than on the keypress, because how far you can
+    // scroll depends on a window size the key handler cannot see.
+    let visible = area.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(visible);
+    let scroll = app.help_scroll.min(max_scroll);
+
+    let position = if max_scroll == 0 {
+        String::new()
+    } else {
+        format!(" {}% ", (scroll * 100).div_ceil(max_scroll.max(1)))
+    };
 
     f.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(lines).scroll((scroll as u16, 0)).block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Style::new().fg(ACCENT))
                 .title(Line::from(Span::styled(
-                    " Keys ",
+                    " Guide ",
                     Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )))
+                .title_bottom(Line::from(Span::styled(
+                    if max_scroll == 0 {
+                        "  ↑↓ scroll · esc close  ".to_string()
+                    } else {
+                        format!("  ↑↓ scroll{position}· esc close  ")
+                    },
+                    Style::new().fg(DIM),
                 ))),
         ),
         area,
