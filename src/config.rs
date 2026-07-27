@@ -63,12 +63,17 @@ pub struct ScanSection {
     /// Report unnamed application-cache entries at least this large.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library_cache_floor: Option<String>,
+    /// Report entries in the download directory at least this large.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloads_floor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caches: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub personal: Option<bool>,
 }
 
 /// A directory that a build tool regenerates.
@@ -202,7 +207,13 @@ pub fn default_path() -> Option<PathBuf> {
     Some(base.join("reap").join("config.toml"))
 }
 
-/// Expand a leading `~` against `$HOME`.
+/// Expand a leading `~`, or a leading `%VARIABLE%`, into a real path.
+///
+/// `~` is the home directory. `%LOCALAPPDATA%` and friends are how the Windows
+/// rules are written, and they are the reason one rule table can cover three
+/// operating systems: a variable that is not set expands to nothing that exists,
+/// so the rule naming it simply does not apply to this machine — exactly what
+/// already happens to `~/Library/Caches/...` on Linux.
 pub fn expand(raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/")
         && let Some(home) = crate::scan::home_dir()
@@ -214,7 +225,39 @@ pub fn expand(raw: &str) -> PathBuf {
     {
         return home;
     }
+    if let Some(expanded) = expand_var(raw) {
+        return expanded;
+    }
     PathBuf::from(raw)
+}
+
+/// `%VAR%` or `%VAR%/rest` against the environment, if the variable is set.
+fn expand_var(raw: &str) -> Option<PathBuf> {
+    let rest = raw.strip_prefix('%')?;
+    let (name, rest) = rest.split_once('%')?;
+    let value = std::env::var_os(name)?;
+    if value.is_empty() {
+        return None;
+    }
+    let base = as_root(&value.to_string_lossy());
+    match rest.trim_start_matches(['/', '\\']) {
+        "" => Some(base),
+        rest => Some(base.join(rest)),
+    }
+}
+
+/// A variable's value as something other paths can be joined onto.
+///
+/// `%SystemDrive%` is `C:` with no separator, and `C:` joined with anything is
+/// a path relative to the current directory *on* drive C rather than the root
+/// of it — so `C:` and `C:\` name different places, and only one of them is
+/// what a rule saying `%SystemDrive%/$Recycle.Bin` meant.
+fn as_root(value: &str) -> PathBuf {
+    if value.ends_with(':') {
+        PathBuf::from(format!("{value}\\"))
+    } else {
+        PathBuf::from(value)
+    }
 }
 
 #[derive(Debug)]
@@ -318,9 +361,16 @@ never_descend = [
 # min_size = "1MB"               # hide anything smaller
 # depth = 8                      # how deep to descend from each root
 # library_cache_floor = "200MB"  # floor for unnamed application caches
+# downloads_floor = "100MB"      # floor for entries in your download directory
 # trash = false                  # move to the Trash instead of deleting
 # docker = true                  # set false to skip the Docker scan
 # caches = true                  # set false to skip the cache scan
+
+# Your own files: old downloads, installers, phone backups. Everything here is
+# graded irreversible unless it announces itself as an installer, so nothing in
+# it is ever taken by `s`, by a safe recipe, or by an unattended `--reap`.
+# Set false to leave your own files out of the scan entirely.
+# personal = true
 
 # ---------------------------------------------------------------------------
 # Extra build-artifact directories
@@ -341,6 +391,11 @@ never_descend = [
 # `prune` runs a command instead of deleting the path, for tools that keep
 # their own bookkeeping. Omit it for a plain removal.
 #
+# `path` accepts `~` for your home directory and `%VARIABLE%` for an
+# environment variable, which is how the Windows rules are written. A path this
+# machine does not have is simply a rule that does not apply, so one config can
+# cover every machine you use.
+#
 # [[cache]]
 # path = "~/.cache/my-tool"
 # group = "package managers"
@@ -348,6 +403,12 @@ never_descend = [
 # detail = "re-downloaded on next run"
 # risk = "safe"
 # prune = ["my-tool", "cache", "clean"]
+#
+# [[cache]]
+# path = "%LOCALAPPDATA%/my-tool/cache"
+# group = "package managers"
+# label = "my-tool cache"
+# risk = "safe"
 
 # ---------------------------------------------------------------------------
 # Re-grade what something costs you
@@ -434,7 +495,7 @@ impl IgnoreSet {
             patterns: patterns
                 .iter()
                 .map(|p| {
-                    let expanded = if p.starts_with('~') {
+                    let expanded = if p.starts_with('~') || p.starts_with('%') {
                         expand(p).to_string_lossy().into_owned()
                     } else {
                         p.clone()
@@ -477,13 +538,15 @@ impl IgnoreSet {
 /// Match `text` against a pattern where `*` stands for any run of characters.
 ///
 /// A pattern with no wildcard also matches anything beneath it, so
-/// `~/.nuget/packages` covers the directory and its contents.
+/// `~/.nuget/packages` covers the directory and its contents. Either separator
+/// counts as one, since a pattern someone typed with `/` should still cover a
+/// Windows path that prints with `\`.
 fn matches_one(pattern: &str, text: &str) -> bool {
     if !pattern.contains('*') {
         return text == pattern
             || text
                 .strip_prefix(pattern)
-                .is_some_and(|r| r.starts_with('/'));
+                .is_some_and(|r| r.starts_with(['/', '\\']));
     }
 
     // Iterative two-pointer glob with backtracking: linear in practice and
@@ -535,6 +598,56 @@ mod tests {
         assert!(matches_one("docker/*", "docker/unused volumes"));
         assert!(matches_one("*", "anything"));
         assert!(!matches_one("*/vendor", "/home/me/vendors"));
+    }
+
+    /// The one variable every machine reap runs on has set, so these can be
+    /// specified without a test reaching into the environment other tests read.
+    const A_VARIABLE_EVERY_MACHINE_HAS: &str = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+
+    #[test]
+    fn a_variable_expands_into_the_path_it_names() {
+        let name = A_VARIABLE_EVERY_MACHINE_HAS;
+        let value = PathBuf::from(std::env::var_os(name).expect("the variable to be set"));
+
+        assert_eq!(expand(&format!("%{name}%")), value);
+        assert_eq!(expand(&format!("%{name}%/child")), value.join("child"));
+        // Written the way a Windows path is written, to the same place.
+        assert_eq!(expand(&format!("%{name}%\\child")), value.join("child"));
+    }
+
+    #[test]
+    fn an_unset_variable_expands_to_nothing_that_exists() {
+        // This is what lets one rule table cover three operating systems. A
+        // rule naming a variable this machine does not have has to come out as
+        // a path that is simply not there — the same as `~/Library/Caches/...`
+        // on Linux — rather than as an error or as a bare relative path that
+        // might accidentally match something.
+        let raw = "%REAP_SPEC_NO_SUCH_VARIABLE%/Google/Chrome/Cache";
+        assert_eq!(expand(raw), PathBuf::from(raw));
+        assert!(!expand(raw).exists());
+    }
+
+    #[test]
+    fn a_bare_drive_letter_is_made_into_a_root() {
+        // `%SystemDrive%` is `C:`, and `C:` joined with a name is relative to
+        // wherever the process happens to be on that drive. Only `C:\` is the
+        // root that `%SystemDrive%/$Recycle.Bin` was written to mean.
+        assert_eq!(as_root("C:"), PathBuf::from("C:\\"));
+        assert_eq!(as_root("C:\\"), PathBuf::from("C:\\"));
+        assert_eq!(as_root("/home/someone"), PathBuf::from("/home/someone"));
+    }
+
+    #[test]
+    fn a_pattern_written_with_slashes_covers_a_path_printed_with_backslashes() {
+        // Patterns are typed by people and paths are printed by the platform.
+        // Someone writing `ignore = ["C:/Users/me/Downloads"]` means the
+        // directory, whichever way the separator leans when it comes back.
+        assert!(matches_one(
+            "C:/Users/me/Downloads",
+            "C:/Users/me/Downloads\\big.iso"
+        ));
+        assert!(matches_one("~/Downloads", "~/Downloads/big.iso"));
+        assert!(!matches_one("C:/Users/me/Down", "C:/Users/me/Downloads"));
     }
 
     #[test]

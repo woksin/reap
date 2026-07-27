@@ -32,6 +32,7 @@ fn category_color(cat: Category) -> Color {
         Category::Artifacts => Color::Rgb(129, 199, 245),
         Category::Docker => Color::Rgb(126, 231, 219),
         Category::Caches => Color::Rgb(252, 191, 122),
+        Category::Personal => Color::Rgb(196, 181, 253),
     }
 }
 

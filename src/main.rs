@@ -88,6 +88,10 @@ struct Cli {
     #[arg(long)]
     no_caches: bool,
 
+    /// Skip the personal scan — downloads, installers, device backups.
+    #[arg(long)]
+    no_personal: bool,
+
     /// Move paths to the volume's trash instead of unlinking them. Recoverable,
     /// but space only comes back once the trash is emptied.
     #[arg(long)]
@@ -229,6 +233,7 @@ fn main() -> Result<()> {
         max_depth: resolve(cli.depth, cfg.scan.depth, 8),
         skip_docker: cli.no_docker || cfg.scan.docker == Some(false),
         skip_caches: cli.no_caches || cfg.scan.caches == Some(false),
+        skip_personal: cli.no_personal || cfg.scan.personal == Some(false),
         scan_home_strays: cli.paths.is_empty() && cfg.scan.roots.is_empty(),
     };
 

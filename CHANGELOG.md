@@ -15,6 +15,41 @@ on each tag are the generated list of pull requests.
 
 ### Added
 
+- **Windows support.** Built and tested in CI alongside macOS and Linux, and
+  published as the executable itself — `reap-windows-x86_64.exe` and
+  `reap-windows-x86.exe` — since a fresh Windows has nothing that unpacks a
+  tarball. Windows on ARM runs the x86_64 build under emulation. Free space
+  comes from `GetDiskFreeSpaceExW` rather than `df`, `--trash` hands paths to
+  the shell's Recycle Bin, `i` reveals through Explorer, and the guards that
+  refuse to delete a system directory are written against `C:\Windows`,
+  `Program Files`, `ProgramData` and `$Recycle.Bin` rather than against unix
+  paths.
+- **A `Personal` category** — old downloads, installers and phone backups.
+  Nothing in it regenerates itself, so nothing in it is guessed at: anything
+  announcing itself as an installer (`.dmg`, `.exe`, `.pkg`, `.iso`, `.msi`,
+  `.deb`, `.rpm`) is graded rebuildable, and **everything else is graded
+  irreversible** — which keeps it out of `s`, out of every safe recipe, out of
+  an unattended `--reap`, and behind the typed confirmation. Device backups are
+  named after the device rather than its identifier. `--no-personal` or
+  `personal = false` under `[scan]` turns it off.
+- **Caches for the rest of the machine.** Chrome, Firefox, Safari, Edge and
+  Brave (caches only, never a profile); Adobe's media cache, waveform and
+  Camera Raw files, After Effects' disk cache, DaVinci Resolve's render cache,
+  Blender; Spotify's stream cache and offline downloads; Steam shader caches
+  and part-downloads; Windows temporary files, crash dumps, shader caches and
+  the Recycle Bin, which is emptied through the shell rather than unlinked.
+- **An Electron sweep.** Slack, Discord, Teams, VS Code, Figma and everything
+  else built on Chromium write `Cache`, `Code Cache` and `GPUCache` into their
+  own data directory, where no platform's cache sweep looks. reap now walks
+  `~/Library/Application Support`, `~/.config`, `%APPDATA%` and
+  `%LOCALAPPDATA%` for those names exactly, grouped by the app that owns them.
+- Two recipes for a machine that is not primarily a build machine: `a` for the
+  caches applications simply rebuild, and `i` for installers already run.
+- `%VARIABLE%` in a cache rule's `path`, alongside `~`. A variable this machine
+  does not have expands to a path that is not there, so one rule table covers
+  three operating systems the same way `~/Library/Caches/...` already covered
+  two.
+- `downloads_floor` under `[scan]`, defaulting to 100 MB.
 - `reap update`, which works out how reap was installed from where its binary
   sits and hands the job to whoever put it there — Homebrew or cargo. A binary
   placed by hand gets instructions rather than being overwritten.
@@ -29,6 +64,19 @@ on each tag are the generated list of pull requests.
 
 - Release assets are named for the machine rather than the Rust target triple:
   `reap-macos-arm64.tar.gz` instead of `reap-aarch64-apple-darwin.tar.gz`.
+- The unnamed-cache sweep steps *around* a rule rather than over it. Previously
+  a rule naming `~/Library/Caches/Google/Chrome` did not stop the sweep from
+  also offering `~/Library/Caches/Google` whole, so the same bytes appeared
+  twice under two labels and were counted twice in the headline figure.
+
+> [!IMPORTANT]
+> The `Personal` category is on by default, and installers in your download
+> directory are graded `rebuildable`. An existing unattended
+> `reap --reap --risk rebuildable --yes` will therefore start removing old
+> installers it did not touch before. Nothing graded irreversible — the rest of
+> your downloads, and every device backup — is reachable that way at any risk
+> ceiling below `irreversible`. Add `--no-personal`, or `personal = false`
+> under `[scan]`, to keep automation to exactly what it took before.
 
 ## [1.0.0]
 

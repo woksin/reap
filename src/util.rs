@@ -92,10 +92,11 @@ pub fn human_age(days: u64) -> String {
     }
 }
 
-/// Free and total bytes on the volume holding `path`, via `df`.
+/// Free and total bytes on the volume holding `path`.
 ///
-/// `statvfs` is not in std and this is queried once per run, so shelling out
-/// costs nothing and keeps the dependency list short.
+/// `statvfs` is not in std and this is queried a handful of times per run, so
+/// shelling out to `df` costs nothing and keeps the dependency list short.
+#[cfg(not(windows))]
 pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
     let out = std::process::Command::new("df")
         .arg("-Pk")
@@ -113,13 +114,52 @@ pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
     Some((available * 1024, total * 1024))
 }
 
-/// Shorten a path for display, replacing `$HOME` with `~`.
+/// Free and total bytes on the volume holding `path`.
+///
+/// There is no `df` on Windows and the shell alternatives are either deprecated
+/// (`wmic`) or print numbers in whatever the machine's locale does, so this asks
+/// the kernel directly. `GetDiskFreeSpaceExW` takes three out-pointers and no
+/// structure, which makes the declaration unambiguous — the reason it is worth
+/// doing here and not for anything more elaborate.
+#[cfg(windows)]
+pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+
+    unsafe extern "system" {
+        fn GetDiskFreeSpaceExW(
+            directory: *const u16,
+            free_available_to_caller: *mut u64,
+            total_bytes: *mut u64,
+            total_free_bytes: *mut u64,
+        ) -> i32;
+    }
+
+    // The call needs a directory that exists; a candidate's path may already
+    // have been reaped by the time free space is measured again.
+    let mut dir = path;
+    while !dir.is_dir() {
+        dir = dir.parent()?;
+    }
+
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call, and
+    // the three out-parameters are distinct, initialised, correctly sized locals.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) };
+    (ok != 0).then_some((available, total))
+}
+
+/// Shorten a path for display, replacing the home directory with `~`.
 pub fn tilde(path: &Path) -> String {
     let s = path.display().to_string();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && s.starts_with(&home) => {
-            format!("~{}", &s[home.len()..])
+    match crate::scan::home_dir() {
+        Some(home) => {
+            let home = home.display().to_string();
+            match s.strip_prefix(&home) {
+                Some(rest) if !home.is_empty() => format!("~{rest}"),
+                _ => s,
+            }
         }
-        _ => s,
+        None => s,
     }
 }
