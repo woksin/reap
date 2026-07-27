@@ -51,18 +51,40 @@ work. Those look identical to `git branch --merged`. reap tells them apart.
 
 ## Install
 
+A binary from the [latest release](https://github.com/woksin/reap/releases/latest).
+Pick the line for your machine — the last word is the only difference:
+
+```bash
+# macOS, Apple silicon
+curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-aarch64-apple-darwin.tar.gz | tar xz
+# macOS, Intel
+curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-x86_64-apple-darwin.tar.gz | tar xz
+# Linux, arm64
+curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-aarch64-unknown-linux-gnu.tar.gz | tar xz
+# Linux, x86_64
+curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-x86_64-unknown-linux-gnu.tar.gz | tar xz
+
+sudo mv reap /usr/local/bin/
+```
+
+Each release carries a `SHA256SUMS` listing every asset, so a download can be
+checked before it is run. The macOS binaries are unsigned: fetched with `curl`
+they run as-is, but downloaded through a browser Gatekeeper will quarantine
+them, and `xattr -d com.apple.quarantine reap` clears it.
+
+Or build it:
+
 ```bash
 cargo install --git https://github.com/woksin/reap
 ```
-
-Or from a checkout:
 
 ```bash
 git clone https://github.com/woksin/reap && cd reap
 cargo install --path .
 ```
 
-Needs Rust 1.88+. `git` and `docker` are used if present and skipped if not.
+Needs Rust 1.88+ to build. `git` and `docker` are used if present and skipped if
+not.
 
 ## Use
 
@@ -453,6 +475,18 @@ cell buffer, including terminals far too small to draw. The deletion paths are
 covered directly: refusing broad paths, dry-run leaving the disk alone, trashing
 keeping contents recoverable, emptying refusing anything outside a trash, and
 overlapping selections counting their bytes once.
+
+### Releasing
+
+There is no version to bump. Label a pull request `major`, `minor` or `patch`,
+and merging it cuts the release: [cratis/release-action](https://github.com/cratis/release-action)
+works out the next semantic version, tags it, and the
+[release workflow](.github/workflows/release.yml) builds and attaches binaries
+for all four platforms. The version is stamped into `Cargo.toml` at build time
+rather than committed, so `reap --version` reports the release it came from. A
+merge with none of those labels releases nothing.
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

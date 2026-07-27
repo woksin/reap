@@ -1,0 +1,184 @@
+name: Release
+
+# Cuts a release and attaches binaries for the platforms reap supports.
+#
+# The version is not kept in the repository. It comes from the label on the
+# merged pull request — `major`, `minor` or `patch` — which cratis/release-action
+# turns into the next semantic version and a GitHub release. A merge carrying
+# none of those labels releases nothing, so this can run on every push without a
+# paths filter.
+#
+# Triggering on push rather than on the closed pull request is deliberate: a
+# pull request from a fork runs with a read-only token even when merged, and
+# creating a release would fail with a 403. A push to the default branch always
+# has a full-permission token, and the action finds the merged pull request from
+# the commit.
+#
+# The very first release has no predecessor to bump from, so cut it by hand:
+# run this workflow with an explicit `version` (0.1.0). Left at the 0.0.0
+# placeholder, the action releases nothing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release. 0.0.0 means: work it out from the merged pull request."
+        required: true
+        default: "0.0.0"
+        type: string
+      release-notes:
+        description: "Release notes. Left empty, GitHub generates them."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+# Releases are cumulative and must not overtake one another, so a run in
+# progress is allowed to finish rather than being cancelled by the next push.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Work out the version
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.release.outputs.should-publish }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The GitHub release is created by this action's post step, at the end of
+      # this job — so it exists by the time the binaries job starts and has
+      # something to upload to.
+      - name: Release
+        id: release
+        uses: cratis/release-action@v1
+        with:
+          version: ${{ github.event.inputs.version }}
+          release-notes: ${{ github.event.inputs.release-notes }}
+
+  binaries:
+    name: ${{ matrix.target }}
+    if: needs.release.outputs.publish == 'true'
+    needs: [release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          # Built on the oldest runner still supported rather than the newest,
+          # so the binary's glibc floor stays low enough to run on the
+          # distributions people actually have. Static musl would drop the
+          # floor entirely, but its allocator is slow under the parallel
+          # directory walk that the scan spends its time in.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The version lives in the release, not in the repository, so it is
+      # stamped in here rather than committed — the same shape as passing
+      # -p:Version= to a dotnet publish. Without this every downloaded binary
+      # would report the placeholder in Cargo.toml when asked --version.
+      - name: Stamp the version
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # No /g: only the package's own version, never a dependency's.
+          perl -0pi -e "s/^version = \"[^\"]*\"/version = \"$VERSION\"/m" Cargo.toml
+          stamped="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$stamped" != "$VERSION" ]; then
+            echo "Cargo.toml still says $stamped, expected $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Checked rather than assumed: a cross-compiled binary that will not run
+      # is worth finding here and not in an issue. The macOS x86_64 build is
+      # the one case that cannot be checked, since the runner is arm64.
+      - name: Check it runs
+        if: matrix.target != 'x86_64-apple-darwin'
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          reported="$(./target/${{ matrix.target }}/release/reap --version)"
+          echo "$reported"
+          [ "$reported" = "reap $VERSION" ]
+
+      # The version is deliberately not in the file name. It makes
+      # `releases/latest/download/reap-<target>.tar.gz` a stable URL, which is
+      # what the README's install line can be. Which version a tarball holds is
+      # on the release it hangs off, and in `reap --version`.
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="reap-${{ matrix.target }}"
+          tar -czf "${name}.tar.gz" -C "target/${{ matrix.target }}/release" reap
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reap-${{ matrix.target }}
+          path: |
+            reap-*.tar.gz
+            reap-*.tar.gz.sha256
+
+  attach:
+    name: Attach binaries to the release
+    if: needs.release.outputs.publish == 'true'
+    needs: [release, binaries]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Collect the checksums into one file
+        run: |
+          set -euo pipefail
+          cat ./artifacts/*.sha256 | sed 's|.*/||' > ./artifacts/SHA256SUMS
+          rm -f ./artifacts/*.tar.gz.sha256
+          cat ./artifacts/SHA256SUMS
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release.outputs.tag }}
+          files: |
+            ./artifacts/*.tar.gz
+            ./artifacts/SHA256SUMS

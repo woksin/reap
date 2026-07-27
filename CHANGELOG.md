@@ -1,0 +1,64 @@
+# Changelog
+
+Notable changes, newest first. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Versions are not set by hand. A merged pull request labelled `major`, `minor` or
+`patch` decides the next one, and
+[cratis/release-action](https://github.com/cratis/release-action) cuts the
+release from it — so the tag, the GitHub release and the binaries all come from
+that label. This file is the readable summary of what changed; the release notes
+on each tag are the generated list of pull requests.
+
+## [Unreleased]
+
+## [0.1.0]
+
+First release.
+
+### Added
+
+- **Git prunability.** Branches and worktrees are evaluated rather than listed:
+  merged, squash-merged (settled with `git cherry`, which compares patch ids and
+  so sees through a rewritten SHA), pushed, or holding commits that exist in no
+  other clone. Each verdict carries its own risk level. Worktrees are judged on
+  both axes that lose work — uncommitted files and unpushed commits — and only
+  called safe when both are zero.
+- **Build artifacts, with evidence.** `node_modules`, `target`, `bin`/`obj`,
+  `.next`, `.venv`, `Pods` and ~20 more, each reported only when a sibling file
+  proves what produced it. A directory that merely happens to be called `build`
+  is left alone.
+- **Docker.** Unused and dangling images, stopped containers, unused and
+  anonymous volumes, reclaimable BuildKit cache, dangling networks. Images are
+  sized by `UniqueSize` — the space that actually comes back — rather than by a
+  total that is mostly layers shared with images you are keeping.
+- **Caches.** The package managers, Xcode DerivedData, Playwright and Puppeteer
+  browsers, plus anything over 200 MB in the platform cache directory that is
+  not already named. The pnpm store is handed to `pnpm store prune` rather than
+  deleted out from under the `node_modules` trees hard-linked into it.
+- **Three risk levels**, gating deletion. Selecting anything irreversible locks
+  the confirm button until you type `reap`; `s` selects everything except those.
+- **`--trash`**, which renames paths into the volume's trash instead of
+  unlinking them — picking the right trash directory by device id, since a
+  rename cannot cross filesystems. It reports a failure rather than falling back
+  to an unrecoverable delete, and says plainly that trashing frees nothing until
+  the trash is emptied.
+- **Configuration for everything reap knows.** Artifact rules, cache rules,
+  ignore patterns and never-descend directories all come from
+  `~/.config/reap/config.toml`; `--write-config` writes a documented starter.
+  Pressing `x` on a candidate appends the right pattern and saves the file.
+- **A size cache** in `~/.cache/reap/sizes.json`, reused while a directory's
+  mtime is unchanged and the reading is under a week old.
+- macOS and Linux, tested on both in CI.
+
+### Notes
+
+- Sizes are SI — 1 GB is 1000³ bytes — so they can be compared directly against
+  macOS and `docker system df`. `du -h` is 1024-based and reads about 7% smaller
+  for the same bytes.
+- A figure docker states in a form reap cannot read is reported as
+  *unrecognised*, never as `0 B`.
+
+[Unreleased]: https://github.com/woksin/reap/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/woksin/reap/releases/tag/v0.1.0
