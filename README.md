@@ -15,10 +15,10 @@
 
 <br>
 
-<img src="assets/demo.gif" alt="reap scanning a machine, sorting 807 items into safe, rebuildable and irreversible, then reaping the safe tier" width="900">
+<img src="assets/demo.gif" alt="reap scanning a machine, sorting 695 items into safe, rebuildable and irreversible, then reaping the safe tier" width="900">
 
-<sub>One real run on one real machine: 70.4 GB reclaimable, sorted by what it costs to lose it.<br>
-`f` narrows to the safe tier, `R` `1` takes all of it — 4.91 GB, none of it work.</sub>
+<sub>One real run on one real machine: 60.7 GB reclaimable, sorted by what it costs to lose it.<br>
+`f` narrows to the safe tier, `R` `1` takes all of it — 185 MB, none of it work.</sub>
 
 </div>
 

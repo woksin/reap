@@ -19,6 +19,12 @@ Hide
 Type "export PATH=$PWD/target/release:$PATH" Enter
 # The update banner is for people, not for a recording of one.
 Type "export REAP_NO_UPDATE_CHECK=1" Enter
+# Points reap at assets/recording/reap/config.toml, which keeps repositories
+# that are not public out of shot. That file is gitignored on purpose — an
+# exclusion list committed to a public repo publishes the names it hides — so
+# a clean checkout simply finds no config here and scans normally. Write your
+# own before recording anything you intend to publish.
+Type "export XDG_CONFIG_HOME=$PWD/assets/recording" Enter
 Type `export PS1='\[\033[38;2;125;211;252m\]❯\[\033[0m\] '` Enter
 Type "clear" Enter
 Sleep 1s

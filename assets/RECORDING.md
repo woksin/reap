@@ -67,8 +67,8 @@ for f in sorted(glob.glob('seq/f*.png')):
 "
 ```
 
-That produced the exact timeline of the real run — reaping from 20.5s to 36.0s, static
-report after — which is what made a precise trim possible.
+That produced the exact timeline of the real run — Enter at 20.0s, reaping done by 23.0s,
+static report after — which is what made a precise trim possible.
 
 **4. Only now record the real thing**, with sleeps sized for the slow case. Excess is easy
 to cut later; a report that never made it on camera is not.
@@ -93,14 +93,16 @@ The `Hide` / `Show` block is where the environment gets cleaned up before the ca
 Hide
 Type "export PATH=$PWD/target/release:$PATH" Enter
 Type "export REAP_NO_UPDATE_CHECK=1" Enter
+Type "export XDG_CONFIG_HOME=$PWD/assets/recording" Enter
 Type `export PS1='\[\033[38;2;125;211;252m\]❯\[\033[0m\] '` Enter
 Type "clear" Enter
 Sleep 1s
 Show
 ```
 
-Three separate jobs in four lines: run the local build without a visible path, silence the
-app's own update banner, and replace a personal shell prompt with a single neutral glyph.
+Four separate jobs: run the local build without a visible path, silence the app's own
+update banner, point reap at a recording-only config (see below), and replace a personal
+shell prompt with a single neutral glyph.
 
 **Hunt for the environment's opt-out switches.** `REAP_NO_UPDATE_CHECK=1` is the difference
 between a hero GIF that looks maintained and one advertising that it is two versions
@@ -129,7 +131,7 @@ what lazygit, delta, atuin and yazi all converge on.
 - ✅ `gate.gif` — a dialog turning red and `enter confirm (locked)` releasing as the word
   is typed. A screenshot cannot show a lock releasing.
 - ✅ `git.gif` — four branch groups, four different verdicts, dots changing colour.
-- ✅ `find.gif` — 774 findings narrowing to 243 live, across categories.
+- ✅ `find.gif` — 703 findings narrowing to 37 live, across categories.
 - ❌ The quick-reap palette. It is a static list of ten recipes. The ASCII block already in
   the README says the same thing, is searchable, and loads instantly. It kept its place.
 
@@ -139,7 +141,53 @@ content — the risk-tier table under the confirm dialog, the verdict table unde
 browser. A mock deleted with nothing to replace it costs screen-reader users and anyone
 reading the raw file.
 
-**Watch the total weight.** Four GIFs, 4.0 MB. Short clips are what keep that reasonable.
+**Watch the total weight.** Four GIFs, 3.8 MB. Short clips are what keep that reasonable.
+
+## Keeping private work out of shot
+
+A recording of a real machine is a recording of a real machine. The first cut of these GIFs
+was published before anyone counted what was legible in them, and the answer was: two
+private repositories by name, a client project on Azure DevOps, and ten branch names
+describing work in progress.
+
+Nothing leaked that was dangerous — reap renders directory names, sizes and an `rm -rf`
+preview, never file contents, and `util::tilde()` masks `$HOME` so the username never
+appears. But **project names and branch names are disclosure**, and git history makes a
+committed GIF permanent: replacing the file in a later commit does not remove the old blob.
+The decision has to be made before pushing, not after.
+
+So: **do not guess what is private, ask the host.**
+
+```bash
+gh repo view "$org/$name" --json visibility -q .visibility
+```
+
+Run that across every repository the scan can reach, and treat anything that is not
+`PUBLIC` — including non-GitHub remotes and repos with no remote at all — as out of shot.
+It is worth the two minutes; the guesses here were wrong in both directions — one
+repository whose name read like an internal codename turned out to be public, and another
+sitting in the same open-source org turned out not to be. Note that this paragraph names
+neither of them, which is the same discipline as gitignoring the config.
+
+The exclusions then live in a config that vhs points at with `XDG_CONFIG_HOME`, so the
+visible command stays a clean `reap`:
+
+```toml
+# assets/recording/reap/config.toml
+ignore = ["*/some-private-org/*", "PrivateRepo*", "..."]
+```
+
+**That file is gitignored, and it has to be.** An exclusion list committed to a public repo
+publishes exactly the names it exists to hide — the same mistake one level down. A clean
+checkout finds no config there, falls back to a normal scan, and records that machine's own
+findings, which is the correct behaviour for everybody else.
+
+Verify by grepping the findings rather than trusting the patterns:
+
+```bash
+XDG_CONFIG_HOME=$PWD/assets/recording reap --json \
+  | grep -iE 'PrivateRepo|other-private-name' | wc -l    # must be 0
+```
 
 ## Recording something destructive
 
@@ -161,26 +209,26 @@ deleted" became a checked fact instead of a hope.
 
 ## Post-processing
 
-The real reap spent 15 seconds deleting, which is 15 seconds of a README doing nothing much.
-The fix is a three-way split — normal, sped up, normal — concatenated and re-encoded through
-a generated palette:
+Sleeps are sized for the slow case, so every recording ends with dead air to cut:
 
 ```bash
 ffmpeg -i raw.gif -filter_complex "\
-  [0:v]trim=0:21,setpts=PTS-STARTPTS[a];\
-  [0:v]trim=21:36,setpts=(PTS-STARTPTS)/2.5[b];\
-  [0:v]trim=36:40.8,setpts=PTS-STARTPTS[c];\
-  [a][b][c]concat=n=3:v=1,fps=24[v];[v]split[v1][v2];\
+  [0:v]trim=0:27.5,setpts=PTS-STARTPTS,fps=24[v];[v]split[v1][v2];\
   [v1]palettegen=stats_mode=diff[p];\
   [v2][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
   -loop 0 assets/demo.gif
 ```
 
-68 seconds became 32. The `palettegen`/`paletteuse` pair is not optional — re-encoding a GIF
-without it produces visible banding on exactly the kind of flat dark UI a TUI is made of.
+65 seconds became 27.5. The `palettegen`/`paletteuse` pair is not optional even for a plain
+trim — re-encoding a GIF without it produces visible banding on exactly the kind of flat
+dark UI a TUI is made of.
 
-Speeding up a progress bar is a demo convention, but it is still a change to the record, so
-the tape says so in a comment.
+When a stretch is real but boring — a long build, a progress bar grinding through hundreds
+of items — split the filter into three and put the middle through
+`setpts=(PTS-STARTPTS)/2.5`, concatenated with `[a][b][c]concat=n=3:v=1`. An earlier cut of
+the hero needed exactly that, when the reap took fifteen seconds instead of three. Speeding
+up a progress bar is a demo convention, but it is still a change to the record, so the tape
+says so in a comment when it happens.
 
 ---
 
@@ -214,26 +262,37 @@ Work in this order and do not skip ahead:
    Match the terminal theme to the app's own colours. Target roughly 1080x700 at FontSize
    16; GitHub scales README images to about 880px and anything denser stops being legible.
 
-4. **Rehearse before you commit to anything.** If a recording would delete, publish, deploy
+4. **Work out what must not appear, before recording rather than after.** A recording of my
+   machine shows my machine. Enumerate whatever the tool can reach — repositories,
+   hostnames, database names, ticket ids, customer names — and check each against its host
+   rather than guessing from the name (`gh repo view <org>/<repo> --json visibility`).
+   Treat anything not demonstrably public, including non-GitHub remotes and anything with
+   no remote, as out of shot. Put the exclusions in a recording-only config the tape points
+   at through an env var, **gitignore that config** — an exclusion list committed to a
+   public repo publishes the names it hides — and verify by grepping the tool's own output
+   for each name until the count is zero. Do this before the first real render: a committed
+   GIF is permanent, since replacing the file later leaves the old blob in history.
+
+5. **Rehearse before you commit to anything.** If a recording would delete, publish, deploy
    or otherwise change real state, first render it against a dry-run flag, a scratch
    directory, or throwaway fixtures. Extract frames with
    `ffmpeg -i out.gif -vf fps=2 f%04d.png` and actually look at them. Iterate on the tape
    until the frames are right. Never let the first render of a destructive or one-shot
    action be the real one.
 
-5. **Be careful with anything irreversible.** Prefer dry-run for any clip that selects or
+6. **Be careful with anything irreversible.** Prefer dry-run for any clip that selects or
    touches destructive paths, even if it means a visible "dry run" badge — caption it honestly
    rather than hiding it. Audit the tape for the keystroke that commits before rendering.
    Capture the relevant state before and after and confirm in your summary that nothing
    changed.
 
-6. **Record, then trim.** Size the sleeps for the slow case, then cut the excess with
+7. **Record, then trim.** Size the sleeps for the slow case, then cut the excess with
    ffmpeg. If a stretch is real but boring — a long build, a progress bar — speed up just
    that segment with `trim`/`setpts`/`concat`, and always re-encode through
    `palettegen`/`paletteuse` or you will get banding. Note any speed-up in a tape comment.
    Aim for a hero around 30s, clips at 15-20s, and keep the total under about 5 MB.
 
-7. **Wire them into the README** in their sections, each with descriptive alt text and a
+8. **Wire them into the README** in their sections, each with descriptive alt text and a
    one-or-two-line caption. If a GIF makes an existing ASCII mock or screenshot redundant,
    replace it — but only when the prose or table beside it already carries the same
    information as text. Never leave a section with no textual equivalent.

@@ -6,18 +6,19 @@
 # reap at the end is real too — `1` in the quick-reap palette is the safe
 # recipe, so nothing it takes is anything you cannot get back.
 #
-# How long the reap itself takes depends on the machine; the sleep below is
-# sized for the slow case. The committed GIF then had its tail trimmed and its
-# reaping phase run at 2.5x, so a run that deletes for fifteen seconds does not
-# spend fifteen seconds of a README doing it:
+# How long the reap itself takes depends on how much there is to take, so the
+# sleep below is sized for the slow case and the excess comes off afterwards:
 #
 #   ffmpeg -i out.gif -filter_complex "\
-#     [0:v]trim=0:21,setpts=PTS-STARTPTS[a];\
-#     [0:v]trim=21:36,setpts=(PTS-STARTPTS)/2.5[b];\
-#     [0:v]trim=36:40.8,setpts=PTS-STARTPTS[c];\
-#     [a][b][c]concat=n=3:v=1,fps=24[v];[v]split[v1][v2];\
-#     [v1]palettegen=stats_mode=diff[p];[v2][p]paletteuse=dither=bayer" \
+#     [0:v]trim=0:27.5,setpts=PTS-STARTPTS,fps=24[v];[v]split[v1][v2];\
+#     [v1]palettegen=stats_mode=diff[p];\
+#     [v2][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
 #     -loop 0 assets/demo.gif
+#
+# Re-encoding a GIF without the palettegen/paletteuse pair bands badly on a flat
+# dark UI, so keep it even for a plain trim. If a run deletes for long enough
+# that the gauge gets boring, split the filter into three and put the middle
+# stretch through `setpts=(PTS-STARTPTS)/2.5` — and say so here when you do.
 
 Output assets/demo.gif
 
