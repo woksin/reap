@@ -101,6 +101,9 @@ pub struct App {
     /// Cursor in the palette, so the highlighted recipe can explain itself.
     pub recipe_idx: usize,
 
+    /// How far down the guide has been scrolled.
+    pub help_scroll: usize,
+
     /// A newer release, once the background check has found one.
     pub update_available: Option<String>,
     update_rx: Option<Receiver<String>>,
@@ -147,6 +150,7 @@ impl App {
                 .and_then(|d| crate::util::disk_free(&d)),
             recipes: crate::recipes::compile(&config),
             recipe_idx: 0,
+            help_scroll: 0,
             update_available: None,
             // Off the main thread and answered at most once a day, so a slow
             // or unreachable network delays nothing and says nothing.

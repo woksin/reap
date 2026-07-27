@@ -80,8 +80,10 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            asset: macos-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
+            asset: macos-x86_64
           # Built on the oldest runner still supported rather than the newest,
           # so the binary's glibc floor stays low enough to run on the
           # distributions people actually have. Static musl would drop the
@@ -89,8 +91,10 @@ jobs:
           # directory walk that the scan spends its time in.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            asset: linux-arm64
 
     steps:
       - name: Checkout code
@@ -136,21 +140,25 @@ jobs:
           echo "$reported"
           [ "$reported" = "reap $VERSION" ]
 
-      # The version is deliberately not in the file name. It makes
-      # `releases/latest/download/reap-<target>.tar.gz` a stable URL, which is
+      # Named for the machine rather than for the Rust target triple that built
+      # it: someone choosing a download should not have to know what
+      # "unknown-linux-gnu" means.
+      #
+      # The version is deliberately not in the file name either. It makes
+      # `releases/latest/download/reap-<platform>.tar.gz` a stable URL, which is
       # what the README's install line can be. Which version a tarball holds is
       # on the release it hangs off, and in `reap --version`.
       - name: Package
         run: |
           set -euo pipefail
-          name="reap-${{ matrix.target }}"
+          name="reap-${{ matrix.asset }}"
           tar -czf "${name}.tar.gz" -C "target/${{ matrix.target }}/release" reap
           shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reap-${{ matrix.target }}
+          name: reap-${{ matrix.asset }}
           path: |
             reap-*.tar.gz
             reap-*.tar.gz.sha256
@@ -237,23 +245,23 @@ jobs:
 
             on_macos do
               on_arm do
-                url "${base}/reap-aarch64-apple-darwin.tar.gz"
-                sha256 "$(sha aarch64-apple-darwin)"
+                url "${base}/reap-macos-arm64.tar.gz"
+                sha256 "$(sha macos-arm64)"
               end
               on_intel do
-                url "${base}/reap-x86_64-apple-darwin.tar.gz"
-                sha256 "$(sha x86_64-apple-darwin)"
+                url "${base}/reap-macos-x86_64.tar.gz"
+                sha256 "$(sha macos-x86_64)"
               end
             end
 
             on_linux do
               on_arm do
-                url "${base}/reap-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "$(sha aarch64-unknown-linux-gnu)"
+                url "${base}/reap-linux-arm64.tar.gz"
+                sha256 "$(sha linux-arm64)"
               end
               on_intel do
-                url "${base}/reap-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "$(sha x86_64-unknown-linux-gnu)"
+                url "${base}/reap-linux-x86_64.tar.gz"
+                sha256 "$(sha linux-x86_64)"
               end
             end
 

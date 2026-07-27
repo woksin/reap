@@ -64,7 +64,7 @@ impl Strategy {
             Strategy::Manual => format!(
                 "curl -fsSL https://github.com/{REPO}/releases/latest/download/reap-{}.tar.gz | tar xz\n\
                  sudo mv reap {}",
-                target_triple(),
+                asset_name(),
                 std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.display().to_string()))
@@ -77,13 +77,19 @@ impl Strategy {
 }
 
 /// The release asset this machine would want.
-pub fn target_triple() -> String {
-    let arch = std::env::consts::ARCH;
+///
+/// Named for the machine rather than the Rust target triple that built it —
+/// nobody choosing a download should have to know what "unknown-linux-gnu" is.
+pub fn asset_name() -> String {
     let os = match std::env::consts::OS {
-        "macos" => "apple-darwin",
-        _ => "unknown-linux-gnu",
+        "macos" => "macos",
+        _ => "linux",
     };
-    format!("{arch}-{os}")
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{os}-{arch}")
 }
 
 /// Work out how this binary was installed, from where it lives.
@@ -342,18 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn the_target_triple_names_a_real_release_asset() {
-        // These are exactly the four the release workflow builds.
-        let triple = target_triple();
+    fn the_asset_name_matches_something_the_release_actually_publishes() {
+        // Exactly the four the release workflow builds. Drift here sends
+        // someone to a 404 with no way to tell why.
+        let asset = asset_name();
         assert!(
-            [
-                "aarch64-apple-darwin",
-                "x86_64-apple-darwin",
-                "aarch64-unknown-linux-gnu",
-                "x86_64-unknown-linux-gnu",
-            ]
-            .contains(&triple.as_str()),
-            "no release asset is built for {triple}"
+            ["macos-arm64", "macos-x86_64", "linux-arm64", "linux-x86_64",]
+                .contains(&asset.as_str()),
+            "no release asset is published for {asset}"
         );
     }
 }

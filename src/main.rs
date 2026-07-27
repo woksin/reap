@@ -1,6 +1,7 @@
 mod app;
 mod cache;
 mod config;
+mod guide;
 mod model;
 mod reaper;
 mod recipes;
@@ -115,6 +116,8 @@ struct Cli {
 enum Command {
     /// Update reap to the latest release, using whatever installed it.
     Update,
+    /// Print the walkthrough — the same one `?` shows in the interface.
+    Guide,
 }
 
 /// How far up the risk scale an unattended run is allowed to go.
@@ -168,8 +171,13 @@ pub fn parse_size(s: &str) -> u64 {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Some(Command::Update) = cli.command {
-        return update::run(env!("CARGO_PKG_VERSION"));
+    match cli.command {
+        Some(Command::Update) => return update::run(env!("CARGO_PKG_VERSION")),
+        Some(Command::Guide) => {
+            print!("{}", guide::plain());
+            return Ok(());
+        }
+        None => {}
     }
 
     let config_path = cli
@@ -539,7 +547,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
 
 fn handle_key(app: &mut App, code: KeyCode) {
     match app.mode {
-        Mode::Help => app.mode = Mode::Browsing,
+        // A document, so it scrolls rather than closing under the first key
+        // someone presses to read further down it.
+        Mode::Help => match code {
+            KeyCode::Up | KeyCode::Char('k') => app.help_scroll = app.help_scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => app.help_scroll += 1,
+            KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+            KeyCode::PageDown => app.help_scroll += 10,
+            KeyCode::Home => app.help_scroll = 0,
+            _ => {
+                app.help_scroll = 0;
+                app.mode = Mode::Browsing;
+            }
+        },
 
         Mode::Search => match code {
             KeyCode::Esc => {

@@ -75,15 +75,15 @@ brew install reap
 
 ```bash
 # macOS, Apple silicon
-curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-aarch64-apple-darwin.tar.gz | tar xz
+curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-macos-arm64.tar.gz | tar xz
 # Linux, x86_64
-curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -fsSL https://github.com/woksin/reap/releases/latest/download/reap-linux-x86_64.tar.gz | tar xz
 
 sudo mv reap /usr/local/bin/
 ```
 
-Also built for `x86_64-apple-darwin` and `aarch64-unknown-linux-gnu` — swap the last part
-of the name. Every release carries a `SHA256SUMS`.
+Also `reap-macos-x86_64` and `reap-linux-arm64` — swap the last part of the name. Every
+release carries a `SHA256SUMS`.
 
 </td></tr>
 <tr><td><b>Cargo</b><br><sub>Rust 1.88+</sub></td><td>
@@ -101,6 +101,15 @@ cargo install --git https://github.com/woksin/reap
 > it. Homebrew handles this for you.
 
 `git` and `docker` are used if present and skipped if not.
+
+### Learning it
+
+```bash
+reap guide
+```
+
+The same walkthrough `?` shows inside the interface: what the four categories are, what
+the risk levels mean, how selection works, and what happens when you press `d`.
 
 ### Staying current
 

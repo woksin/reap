@@ -351,6 +351,68 @@ fn preview_recipes() {
     println!("\n{}\n", draw(&mut app, 104, 20));
 }
 
+#[test]
+fn the_guide_opens_on_the_first_thing_someone_needs() {
+    let mut app = fixture();
+    app.mode = Mode::Help;
+    let out = draw(&mut app, 100, 32);
+
+    assert!(out.contains("Guide"), "no guide:\n{out}");
+    assert!(
+        out.contains("What you are looking at"),
+        "wrong opening:\n{out}"
+    );
+    // The risk levels are the reason the tool exists, so they are on the way in.
+    assert!(out.contains("irreversible"), "risks missing:\n{out}");
+}
+
+#[test]
+fn the_guide_scrolls_rather_than_stopping_at_one_screen() {
+    let mut app = fixture();
+    app.mode = Mode::Help;
+    let top = draw(&mut app, 100, 32);
+
+    app.help_scroll = 500; // clamped to the end by the renderer
+    let further = draw(&mut app, 100, 32);
+
+    assert_ne!(top, further, "scrolling changed nothing");
+    // The key list lives at the bottom, so reaching it proves the whole
+    // document is reachable and not just the first screenful.
+    assert!(
+        further.contains("quit"),
+        "never reached the keys:\n{further}"
+    );
+}
+
+#[test]
+fn the_guide_and_the_command_line_say_the_same_thing() {
+    // One source, so the explanation cannot drift between the two places
+    // someone might read it.
+    let mut app = fixture();
+    app.mode = Mode::Help;
+    let rendered = draw(&mut app, 100, 40);
+    let printed = crate::guide::plain();
+
+    assert!(printed.contains("What you are looking at"));
+    assert!(rendered.contains("What you are looking at"));
+    for section in crate::guide::GUIDE {
+        assert!(
+            printed.contains(section.title),
+            "cli missing {}",
+            section.title
+        );
+    }
+}
+
+/// `cargo test preview_guide -- --ignored --nocapture`
+#[test]
+#[ignore = "visual aid, not an assertion"]
+fn preview_guide() {
+    let mut app = fixture();
+    app.mode = Mode::Help;
+    println!("\n{}\n", draw(&mut app, 100, 32));
+}
+
 /// `cargo test preview_update -- --ignored --nocapture`
 #[test]
 #[ignore = "visual aid, not an assertion"]
