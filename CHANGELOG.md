@@ -43,6 +43,20 @@ on each tag are the generated list of pull requests.
   own data directory, where no platform's cache sweep looks. reap now walks
   `~/Library/Application Support`, `~/.config`, `%APPDATA%` and
   `%LOCALAPPDATA%` for those names exactly, grouped by the app that owns them.
+- **A settings screen, on `C`.** Every rule reap is working from — scan roots,
+  thresholds, all ninety cache rules, the build rules, your ignores, your
+  re-gradings and the recipes — with where each came from and whether it is on.
+  `e` changes a path, pattern or value, `n` renames one of yours, `a` adds one,
+  `x` turns a rule off *and back on*, `g` re-grades what something costs, `d`
+  deletes something you added. Changes are written as you make them, in the
+  same shapes a hand-written config uses, so nothing learned here stops being
+  true at the command line. Built-in rules can be turned off and re-graded but
+  never edited or deleted, so a later release correcting a vendor's cache path
+  still reaches you. This is also what makes `x` reversible: it used to write a
+  line to a file nobody was looking at.
+- **A legend, on `L`**, drawn over whatever screen you are on and dismissed by
+  any key — so what a triangle means can be settled without losing your place
+  in a list of four hundred items. `reap guide` prints it too.
 - Two recipes for a machine that is not primarily a build machine: `a` for the
   caches applications simply rebuild, and `i` for installers already run.
 - `%VARIABLE%` in a cache rule's `path`, alongside `~`. A variable this machine

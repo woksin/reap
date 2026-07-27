@@ -20,6 +20,8 @@ pub enum Mode {
     Help,
     /// The quick-reap palette: one key per standing decision.
     Recipes,
+    /// Every rule reap is working from, and the means to change it.
+    Settings,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -101,8 +103,20 @@ pub struct App {
     /// Cursor in the palette, so the highlighted recipe can explain itself.
     pub recipe_idx: usize,
 
+    /// The settings screen, built the first time it is opened.
+    ///
+    /// It holds a copy of every built-in rule so the list can show what reap
+    /// ships with alongside what the config adds, and someone who never opens
+    /// it should not pay for that.
+    pub settings: Option<crate::settings::Settings>,
+
     /// How far down the guide has been scrolled.
     pub help_scroll: usize,
+
+    /// Whether the legend is showing. Not a mode: it is drawn over whatever
+    /// screen you are on and dismissed by any key, so it never costs you your
+    /// place in a list of four hundred items.
+    pub legend: bool,
 
     /// A newer release, once the background check has found one.
     pub update_available: Option<String>,
@@ -150,7 +164,9 @@ impl App {
                 .and_then(|d| crate::util::disk_free(&d)),
             recipes: crate::recipes::compile(&config),
             recipe_idx: 0,
+            settings: None,
             help_scroll: 0,
+            legend: false,
             update_available: None,
             // Off the main thread and answered at most once a day, so a slow
             // or unreachable network delays nothing and says nothing.
@@ -621,6 +637,123 @@ impl App {
                 self.status = format!("could not write {}: {e}", self.config_path.display());
             }
         }
+    }
+
+    // ---- the settings screen --------------------------------------------
+
+    pub fn open_settings(&mut self) {
+        if self.settings.is_none() {
+            self.settings = Some(crate::settings::Settings::new(&self.config));
+        }
+        if let Some(settings) = self.settings.as_mut() {
+            // Reopened after `x` wrote from the browsing screen, so the list is
+            // never showing a config that has moved on without it.
+            settings.rebuild(&self.config);
+            settings.changed = false;
+            // The one thing about this screen that is not visible on it. Where
+            // the file lives is already along the bottom edge.
+            settings.status = "every change is written as you make it".into();
+        }
+        self.mode = Mode::Settings;
+    }
+
+    /// Leave the settings screen, carrying the new rules back with us.
+    ///
+    /// The scanners took a snapshot of the rules when they started, so a change
+    /// made here reaches the list only on the next scan. Rebuilding them now
+    /// rather than at the next `r` means the rescan uses what is on screen; the
+    /// status line asks for that rescan rather than starting one, because
+    /// re-walking the disk is not something a keystroke should do unasked.
+    pub fn close_settings(&mut self) {
+        self.mode = Mode::Browsing;
+        let Some(settings) = self.settings.as_mut() else {
+            return;
+        };
+        if !std::mem::take(&mut settings.changed) {
+            self.status = "scan complete".into();
+            return;
+        }
+        self.opts.rules = std::sync::Arc::new(crate::scan::Rules::from_config(&self.config));
+        self.recipes = crate::recipes::compile(&self.config);
+        // Applied to what is already on screen too, so turning a rule off is
+        // visible immediately rather than only after the next walk.
+        let ignore = crate::config::IgnoreSet::new(&self.config.ignore);
+        self.items.retain(|c| !ignore.matches_candidate(c));
+        self.rebuild();
+        self.status = "configuration saved · press r to rescan with it".into();
+    }
+
+    /// Is the settings screen waiting for something to be typed?
+    pub fn settings_editing(&self) -> bool {
+        self.settings.as_ref().is_some_and(|s| s.edit.is_some())
+    }
+
+    /// Run something that only reads the config — moving, expanding, starting
+    /// an edit.
+    pub fn with_settings(
+        &mut self,
+        act: impl FnOnce(&mut crate::settings::Settings, &crate::config::Config) -> Option<String>,
+    ) {
+        let Some(mut settings) = self.settings.take() else {
+            return;
+        };
+        if let Some(message) = act(&mut settings, &self.config) {
+            settings.status = message;
+        }
+        self.settings = Some(settings);
+    }
+
+    /// Accept what was typed on the settings screen.
+    ///
+    /// Kept apart from `change_settings` because a rejected edit changed
+    /// nothing, and writing the file to report a typo would be a strange thing
+    /// for a tool to do — and would replace the reason with a disk error if the
+    /// write then failed.
+    pub fn commit_settings_edit(&mut self) {
+        let Some(mut settings) = self.settings.take() else {
+            return;
+        };
+        let before = self.config.clone();
+        settings.status = match settings.commit_edit(&mut self.config) {
+            Err(why) => why,
+            Ok(message) => match self.config.save(&self.config_path) {
+                Ok(()) => message,
+                Err(e) => {
+                    self.config = before;
+                    settings.rebuild(&self.config);
+                    format!("could not write {}: {e}", self.config_path.display())
+                }
+            },
+        };
+        self.settings = Some(settings);
+    }
+
+    /// Run something that changes the config, and write it out.
+    ///
+    /// The config is snapshotted first and restored if the write fails, so what
+    /// is on screen is always what is on disk. A settings screen that has
+    /// quietly diverged from the file is worse than one that could not save:
+    /// the next thing written would persist both changes, including the one the
+    /// user was told had failed.
+    pub fn change_settings(
+        &mut self,
+        act: impl FnOnce(&mut crate::settings::Settings, &mut crate::config::Config) -> Option<String>,
+    ) {
+        let Some(mut settings) = self.settings.take() else {
+            return;
+        };
+        let before = self.config.clone();
+        if let Some(message) = act(&mut settings, &mut self.config) {
+            settings.status = match self.config.save(&self.config_path) {
+                Ok(()) => message,
+                Err(e) => {
+                    self.config = before;
+                    settings.rebuild(&self.config);
+                    format!("could not write {}: {e}", self.config_path.display())
+                }
+            };
+        }
+        self.settings = Some(settings);
     }
 
     /// Permanently remove what this run put in the trash.

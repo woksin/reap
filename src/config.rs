@@ -120,7 +120,7 @@ pub struct CacheRule {
 /// container someone is keeping to debug is not. Since risk is what `s` and
 /// the recipes select by, being able to correct it is what makes those keys
 /// fit rather than nearly fit.
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct OverrideRule {
     /// What it applies to. Matched against the path, the label and

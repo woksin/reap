@@ -116,7 +116,14 @@ pub fn render(f: &mut Frame, app: &mut App, tick: u64) {
         Mode::Report => render_report(f, app),
         Mode::Help => render_help(f, app),
         Mode::Recipes => render_recipes(f, app),
+        Mode::Settings => render_settings(f, app),
         _ => {}
+    }
+
+    // Last, and over whatever is already there: the legend answers one question
+    // about the screen you are on without taking you off it.
+    if app.legend {
+        render_legend(f, app);
     }
 }
 
@@ -493,18 +500,18 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let hints = if app.mode == Mode::Search {
         "type to filter · enter keep · esc clear".to_string()
     } else {
+        // Widest first, and the terminal decides. Each step drops what can be
+        // found another way before what cannot: sorting is discoverable from
+        // the column headings, but nothing on screen hints that `C` exists.
         let full = format!(
-            "R quick · space pick · a all · o sort:{} · / find · d reap · ? help",
+            "R quick · C config · L legend · space pick · a all · o sort:{} · / find · d reap · ? help",
             app.sort.label()
         );
-        let medium = "R quick · space pick · a all · d reap · ? help".to_string();
-        if full.chars().count() <= room {
-            full
-        } else if medium.chars().count() <= room {
-            medium
-        } else {
-            "? help".to_string()
-        }
+        let medium = "R quick · C config · space pick · a all · d reap · ? help".to_string();
+        [full, medium, "d reap · ? help".to_string()]
+            .into_iter()
+            .find(|hint| hint.chars().count() <= room)
+            .unwrap_or_else(|| "? help".to_string())
     };
     let right = vec![Span::styled(hints, Style::new().fg(DIM)), Span::raw(" ")];
 
@@ -989,6 +996,438 @@ fn render_help(f: &mut Frame, app: &App) {
                         format!("  ↑↓ scroll{position}· esc close  ")
                     },
                     Style::new().fg(DIM),
+                ))),
+        ),
+        area,
+    );
+}
+
+/// What one settings row says: the thing, what it is, and the three columns
+/// that make the list scannable down its right edge.
+struct SettingsLine {
+    indent: usize,
+    name: String,
+    /// The path, pattern or value — the part that answers "which one".
+    detail: String,
+    /// Blank where risk does not apply to this kind of row.
+    risk: Option<(String, bool)>,
+    origin: Option<crate::settings::Origin>,
+    /// `Some(false)` draws the off mark; `None` draws nothing.
+    enabled: Option<bool>,
+}
+
+impl SettingsLine {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            indent: 4,
+            name: name.into(),
+            detail: String::new(),
+            risk: None,
+            origin: None,
+            enabled: None,
+        }
+    }
+}
+
+fn settings_line(app: &App, row: &crate::settings::Row) -> SettingsLine {
+    use crate::settings::{Origin, Row, effective_risk};
+    let cfg = &app.config;
+    let Some(settings) = app.settings.as_ref() else {
+        return SettingsLine::new("");
+    };
+    let missing = || SettingsLine::new("—");
+
+    match row {
+        Row::Heading(section) => SettingsLine {
+            indent: 1,
+            name: format!(
+                "{} {} ({})",
+                if settings.expanded.contains(section) {
+                    "▾"
+                } else {
+                    "▸"
+                },
+                section.title(),
+                settings.count(cfg, *section)
+            ),
+            detail: section.blurb().to_string(),
+            ..SettingsLine::new("")
+        },
+
+        Row::Root(i) => match cfg.scan.roots.get(*i) {
+            Some(root) => SettingsLine {
+                detail: if crate::config::expand(root).is_dir() {
+                    String::new()
+                } else {
+                    "nothing there".into()
+                },
+                origin: Some(Origin::Yours),
+                ..SettingsLine::new(root)
+            },
+            None => missing(),
+        },
+
+        Row::Setting(setting) => {
+            let (value, origin) = setting.value(cfg);
+            SettingsLine {
+                name: format!("{:<26} {value}", setting.label()),
+                detail: setting.detail().to_string(),
+                origin: Some(origin),
+                enabled: setting.is_switch().then(|| setting.is_on(cfg)),
+                ..SettingsLine::new("")
+            }
+        }
+
+        Row::Cache(origin, i) => match settings.cache_rule(cfg, *origin, *i) {
+            Some(rule) => {
+                let pattern = crate::settings::cache_off_pattern(rule);
+                let (risk, regraded) = effective_risk(cfg, &pattern, rule.risk);
+                SettingsLine {
+                    name: rule.label.clone(),
+                    detail: if rule.prune.is_empty() {
+                        rule.path.clone()
+                    } else {
+                        format!("{}  $ {}", rule.path, rule.prune.join(" "))
+                    },
+                    risk: Some((risk_name(risk), regraded)),
+                    origin: Some(*origin),
+                    enabled: Some(!crate::settings::is_off(cfg, &pattern)),
+                    indent: 4,
+                }
+            }
+            None => missing(),
+        },
+
+        Row::Artifact(origin, i) => match settings.artifact_rule(cfg, *origin, *i) {
+            Some(rule) => {
+                let pattern = crate::settings::artifact_off_pattern(rule);
+                let (risk, regraded) = effective_risk(cfg, &pattern, rule.risk);
+                SettingsLine {
+                    name: rule.dir.clone(),
+                    detail: if rule.evidence.is_empty() {
+                        "any directory with this name".into()
+                    } else {
+                        format!("beside {}", rule.evidence.join(", "))
+                    },
+                    risk: Some((risk_name(risk), regraded)),
+                    origin: Some(*origin),
+                    enabled: Some(!crate::settings::is_off(cfg, &pattern)),
+                    indent: 4,
+                }
+            }
+            None => missing(),
+        },
+
+        Row::Ignore(i) => match cfg.ignore.get(*i) {
+            Some(pattern) => SettingsLine {
+                origin: Some(Origin::Yours),
+                ..SettingsLine::new(pattern)
+            },
+            None => missing(),
+        },
+
+        Row::Override(i) => match cfg.overrides.get(*i) {
+            Some(rule) => SettingsLine {
+                detail: format!("now counts as {}", risk_name(rule.risk)),
+                risk: Some((risk_name(rule.risk), true)),
+                origin: Some(Origin::Yours),
+                ..SettingsLine::new(rule.matches.join(", "))
+            },
+            None => missing(),
+        },
+
+        Row::Recipe(origin, i) => match settings.recipe_rule(cfg, *origin, *i) {
+            Some(rule) => SettingsLine {
+                name: format!("{}  {}", rule.key, rule.name),
+                detail: rule.detail.clone(),
+                risk: Some((format!("up to {}", risk_name(rule.max_risk)), false)),
+                origin: Some(*origin),
+                ..SettingsLine::new("")
+            },
+            None => missing(),
+        },
+
+        Row::Add(section) => SettingsLine {
+            indent: 4,
+            ..SettingsLine::new(format!("+ {}", section.adds().unwrap_or("add")))
+        },
+    }
+}
+
+fn risk_name(risk: crate::config::RiskName) -> String {
+    Risk::from(risk).label().to_string()
+}
+
+/// Everything reap is working from, and the means to change it.
+fn render_settings(f: &mut Frame, app: &App) {
+    use crate::settings::{Origin, Row};
+    let Some(settings) = app.settings.as_ref() else {
+        return;
+    };
+
+    let area = centered(112, f.area().height, f.area());
+    f.render_widget(Clear, area);
+
+    let inner = area.width.saturating_sub(2) as usize;
+    // Inside the border there are `height - 2` lines, and three of them are
+    // chrome: a leading blank, a blank above the footer, and the footer. One
+    // line over and the footer is the line that gets clipped, which is the one
+    // saying how to leave.
+    let visible = (area.height.saturating_sub(5)) as usize;
+
+    // Keep the cursor near the middle rather than at an edge, so moving through
+    // a section shows what is coming as well as what has passed.
+    let scroll = if settings.rows.len() <= visible {
+        0
+    } else {
+        settings
+            .cursor
+            .saturating_sub(visible / 2)
+            .min(settings.rows.len() - visible)
+    };
+
+    // Right-hand columns, laid out from the edge inwards so they line up down
+    // the whole list whatever a row happens to be.
+    // A space either side, so the mark does not sit against the border.
+    const STATE: usize = 3;
+    const ORIGIN: usize = 9;
+    const RISK: usize = 14;
+    const GAP: usize = 2;
+
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for (i, row) in settings.rows.iter().enumerate().skip(scroll).take(visible) {
+        let here = i == settings.cursor;
+        let line = settings_line(app, row);
+        let heading = matches!(row, Row::Heading(_));
+        let off = line.enabled == Some(false);
+
+        let name_style = match (heading, here, off) {
+            (_, _, true) => Style::new().fg(DIM),
+            (true, _, _) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            (false, true, _) => Style::new()
+                .fg(Color::Rgb(230, 237, 243))
+                .add_modifier(Modifier::BOLD),
+            (false, false, _) => Style::new().fg(Color::Rgb(200, 205, 215)),
+        };
+
+        // Everything the cursor marker, the indent and the right-hand columns
+        // do not need. Worked out per row because a heading is indented less
+        // than the rules under it, and the columns still have to line up.
+        let body = inner.saturating_sub(1 + line.indent + GAP + RISK + ORIGIN + STATE);
+        // The name gets whatever the detail does not need, so a long path is
+        // shortened before a label is.
+        let name_width = (body / 2)
+            .max(body.saturating_sub(line.detail.chars().count() + GAP))
+            .min(body.saturating_sub(GAP));
+        let detail_width = body.saturating_sub(name_width + GAP);
+
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "{}{}",
+                    if here { "▸" } else { " " },
+                    " ".repeat(line.indent)
+                ),
+                Style::new().fg(ACCENT),
+            ),
+            Span::styled(
+                format!("{:<name_width$}", truncate(&line.name, name_width)),
+                name_style,
+            ),
+            Span::styled(
+                format!(
+                    "{:GAP$}{:<detail_width$}",
+                    "",
+                    truncate(&line.detail, detail_width)
+                ),
+                Style::new().fg(DIM),
+            ),
+            Span::raw(" ".repeat(GAP)),
+        ];
+
+        spans.push(match &line.risk {
+            Some((name, regraded)) => Span::styled(
+                format!(
+                    "{:<RISK$}",
+                    format!("{name}{}", if *regraded { " ✎" } else { "" })
+                ),
+                Style::new().fg(if off {
+                    DIM
+                } else {
+                    risk_color(risk_from_name(name))
+                }),
+            ),
+            None => Span::raw(" ".repeat(RISK)),
+        });
+        spans.push(match line.origin {
+            Some(origin) => Span::styled(
+                format!("{:>ORIGIN$}", origin.label()),
+                Style::new().fg(if origin == Origin::Yours {
+                    SELECTED
+                } else {
+                    DIM
+                }),
+            ),
+            None => Span::raw(" ".repeat(ORIGIN)),
+        });
+        spans.push(match line.enabled {
+            Some(true) => Span::styled(" ✓ ", Style::new().fg(SAFE)),
+            Some(false) => Span::styled(" ✗ ", Style::new().fg(DIM)),
+            None => Span::raw(" ".repeat(STATE)),
+        });
+
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(settings_footer(settings, inner));
+
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(ACCENT))
+                .title(Line::from(Span::styled(
+                    " Configuration ",
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )))
+                .title_bottom(Line::from(Span::styled(
+                    format!(" {} ", crate::util::tilde(&app.config_path)),
+                    Style::new().fg(DIM),
+                ))),
+        ),
+        area,
+    );
+}
+
+/// The prompt while typing, and the applicable keys the rest of the time.
+///
+/// Which keys those are depends on the row: offering `d` against a built-in
+/// would be offering something that cannot happen, and a footer that lies about
+/// what is possible is worse than one that says less.
+fn settings_footer(settings: &crate::settings::Settings, width: usize) -> Line<'static> {
+    use crate::settings::{Origin, Row};
+
+    if let Some(edit) = &settings.edit {
+        return Line::from(vec![
+            Span::styled(format!("  {} ", edit.prompt), Style::new().fg(ACCENT)),
+            Span::styled("› ", Style::new().fg(DIM)),
+            Span::styled(
+                edit.buffer.clone(),
+                Style::new()
+                    .fg(Color::Rgb(230, 237, 243))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("▏", Style::new().fg(ACCENT)),
+            Span::styled("   enter save · esc cancel", Style::new().fg(DIM)),
+        ]);
+    }
+
+    let mut keys: Vec<&str> = Vec::new();
+    match settings.current() {
+        Some(Row::Heading(_)) => keys.push("enter open"),
+        Some(Row::Add(_)) => keys.push("enter add"),
+        Some(Row::Setting(setting)) => keys.push(if setting.is_switch() {
+            "space toggle"
+        } else {
+            "e change"
+        }),
+        Some(Row::Cache(origin, _)) => {
+            keys.extend(["x on/off", "g re-grade"]);
+            if *origin == Origin::Yours {
+                keys.extend(["e path", "n rename", "d delete"]);
+            }
+        }
+        Some(Row::Artifact(origin, _)) => {
+            keys.extend(["x on/off", "g re-grade"]);
+            if *origin == Origin::Yours {
+                keys.extend(["e edit", "d delete"]);
+            }
+        }
+        Some(Row::Root(_) | Row::Ignore(_)) => keys.extend(["e edit", "d delete"]),
+        Some(Row::Override(_)) => keys.push("d remove"),
+        Some(Row::Recipe(Origin::Yours, _)) => keys.push("d delete"),
+        Some(Row::Recipe(Origin::Builtin, _)) | None => {}
+    }
+    keys.extend(["a add", "L legend", "esc back"]);
+
+    let hint = format!("  {}", keys.join(" · "));
+    // The status has whatever the keys leave, since the keys are the part
+    // someone is looking for when they do not already know what happened.
+    let room = width.saturating_sub(hint.chars().count() + 4);
+    Line::from(vec![
+        Span::styled(hint, Style::new().fg(DIM)),
+        Span::styled(
+            format!("   {}", truncate(&settings.status, room)),
+            Style::new().fg(SELECTED),
+        ),
+    ])
+}
+
+/// Map a printed risk name back to the level, for colouring.
+fn risk_from_name(name: &str) -> Risk {
+    match name {
+        n if n.contains("safe") => Risk::Safe,
+        n if n.contains("irreversible") => Risk::Danger,
+        _ => Risk::Caution,
+    }
+}
+
+fn tone_color(tone: crate::guide::Tone) -> Color {
+    use crate::guide::Tone;
+    match tone {
+        Tone::Safe => SAFE,
+        Tone::Caution => CAUTION,
+        Tone::Danger => DANGER,
+        Tone::Accent => ACCENT,
+        Tone::Dim => DIM,
+    }
+}
+
+/// The marks, and what they mean. Small on purpose: it is opened mid-list to
+/// settle one question, and a full-screen document would lose your place.
+fn render_legend(f: &mut Frame, _app: &App) {
+    // A title and a trailing blank per group, then the leading blank, the
+    // closing line, and the two rows of border.
+    let rows: usize = crate::guide::LEGEND
+        .iter()
+        .map(|g| g.entries.len() + 2)
+        .sum();
+    let area = centered(66, (rows + 4) as u16, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for group in crate::guide::LEGEND {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", group.title),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        for (symbol, meaning, tone) in group.entries {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("   {symbol:<10}"),
+                    Style::new()
+                        .fg(tone_color(*tone))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(*meaning, Style::new().fg(Color::Rgb(200, 205, 215))),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "  ? for the full guide · any key closes",
+        Style::new().fg(DIM),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(ACCENT))
+                .title(Line::from(Span::styled(
+                    " Legend ",
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ))),
         ),
         area,
