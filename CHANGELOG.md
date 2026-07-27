@@ -13,7 +13,7 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
-## [0.1.0]
+## [1.0.0]
 
 First release.
 
@@ -74,5 +74,5 @@ First release.
 - A figure docker states in a form reap cannot read is reported as
   *unrecognised*, never as `0 B`.
 
-[Unreleased]: https://github.com/woksin/reap/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/woksin/reap/releases/tag/v0.1.0
+[Unreleased]: https://github.com/woksin/reap/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/woksin/reap/releases/tag/v1.0.0
