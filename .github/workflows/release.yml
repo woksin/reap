@@ -285,12 +285,14 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # A rebuild of the same version changes nothing, and an empty commit
-          # would be noise in a repository people read to check a formula.
-          if git diff --quiet -- Formula/reap.rb; then
+
+          # Staged first, then compared against HEAD. `git diff` alone does not
+          # see a file that does not exist yet, so the very first formula would
+          # look like "no change" and never be pushed.
+          git add Formula/reap.rb
+          if git diff --cached --quiet; then
             echo "Formula already at ${VERSION}, nothing to push."
             exit 0
           fi
-          git add Formula/reap.rb
           git commit -m "reap ${VERSION}"
           git push
