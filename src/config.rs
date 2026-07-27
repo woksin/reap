@@ -28,6 +28,11 @@ pub struct Config {
     /// Replace the built-in cache rules entirely rather than adding to them.
     #[serde(skip_serializing_if = "is_false")]
     pub replace_builtin_caches: bool,
+    /// Replace the built-in quick-reap recipes entirely rather than adding to
+    /// them. A user whose work does not look like the built-in assumptions
+    /// wants their own keys, not their own keys plus mine.
+    #[serde(skip_serializing_if = "is_false")]
+    pub replace_builtin_recipes: bool,
 
     // Tables must follow every top-level scalar in TOML, so these are declared
     // last: serde emits fields in order, and a file written here has to stay
@@ -36,6 +41,8 @@ pub struct Config {
     pub artifacts: Vec<ArtifactRule>,
     #[serde(rename = "cache", skip_serializing_if = "Vec::is_empty")]
     pub caches: Vec<CacheRule>,
+    #[serde(rename = "recipe", skip_serializing_if = "Vec::is_empty")]
+    pub recipes: Vec<RecipeRule>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -98,12 +105,44 @@ pub struct CacheRule {
     pub prune: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+/// A one-key selection: "everything docker can spare", "the branches that are
+/// already upstream".
+///
+/// The work of using reap is deciding what to tick, and that decision is nearly
+/// always the same one. A recipe is that decision written down once — matched
+/// the same way `ignore` is, so a pattern learned in one place works in the
+/// other.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RecipeRule {
+    /// The key that runs it. Single character.
+    pub key: char,
+    /// Shown in the palette.
+    pub name: String,
+    /// What it covers. Matched against the path, the label and
+    /// `category/group`, exactly as `ignore` is. Empty means everything.
+    #[serde(default, rename = "match")]
+    pub matches: Vec<String>,
+    /// The most dangerous thing it will tick. `safe` never selects anything
+    /// that costs a rebuild; `irreversible` selects whatever the patterns
+    /// cover, and still has to get past the typed confirmation.
+    #[serde(default = "default_recipe_risk")]
+    pub max_risk: RiskName,
+    /// One line on what it leaves behind, shown under the palette.
+    #[serde(default)]
+    pub detail: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskName {
     Safe,
     Rebuildable,
     Irreversible,
+}
+
+fn default_recipe_risk() -> RiskName {
+    RiskName::Safe
 }
 
 fn is_false(b: &bool) -> bool {
@@ -244,6 +283,7 @@ never_descend = [
 # Use only the rules below, ignoring everything reap ships with.
 # replace_builtin_artifacts = false
 # replace_builtin_caches = false
+# replace_builtin_recipes = false
 
 # ---------------------------------------------------------------------------
 # Scanning
@@ -287,6 +327,36 @@ never_descend = [
 # detail = "re-downloaded on next run"
 # risk = "safe"
 # prune = ["my-tool", "cache", "clean"]
+
+# ---------------------------------------------------------------------------
+# Quick-reap recipes — the R key
+# ---------------------------------------------------------------------------
+# One key for a decision you make the same way every time. A recipe only
+# selects; the confirm dialog still gates what happens next, so a recipe can
+# never delete something ticking by hand would not have.
+#
+# `match` uses the same patterns as `ignore` above. Leave it out to mean
+# everything, and let `max_risk` do the bounding.
+#
+# max_risk is the most dangerous thing it will tick:
+#   safe          nothing that costs a rebuild
+#   rebuildable   time, but no work
+#   irreversible  whatever the patterns cover
+#
+# These add to the built-in recipes. A key you reuse takes that key over.
+#
+# [[recipe]]
+# key = "n"
+# name = "Node · every node_modules"
+# detail = "pnpm install brings them all back"
+# match = ["build artifacts/node_modules"]
+# max_risk = "rebuildable"
+#
+# [[recipe]]
+# key = "p"
+# name = "This project only"
+# match = ["~/work/big-monorepo/*"]
+# max_risk = "rebuildable"
 "##;
 
 const CONFIG_HEADER: &str = "\
@@ -536,6 +606,28 @@ mod template_tests {
         let cfg: Config = toml::from_str(TEMPLATE).expect("template must be valid TOML");
         assert!(cfg.ignore.is_empty());
         assert!(cfg.artifacts.is_empty());
+    }
+
+    #[test]
+    fn the_recipe_the_template_shows_is_one_that_works() {
+        // A commented example that does not parse when uncommented is worse
+        // than no example: a malformed config is fatal, so the first thing a
+        // user tries would stop reap from starting.
+        let uncommented: String = TEMPLATE
+            .lines()
+            .skip_while(|l| !l.contains("[[recipe]]"))
+            .map(|l| l.trim_start_matches("# ").trim_start_matches('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let cfg: Config =
+            toml::from_str(&uncommented).expect("the template's own recipe example must parse");
+        assert_eq!(cfg.recipes.len(), 2, "both examples should be there");
+        assert_eq!(cfg.recipes[0].key, 'n');
+
+        // And it has to survive compiling, not merely deserialising.
+        let compiled = crate::recipes::compile(&cfg);
+        assert!(compiled.iter().any(|r| r.key == 'n'));
     }
 
     #[test]

@@ -3,6 +3,7 @@ mod cache;
 mod config;
 mod model;
 mod reaper;
+mod recipes;
 mod scan;
 #[cfg(test)]
 mod specs;
@@ -343,6 +344,22 @@ fn handle_key(app: &mut App, code: KeyCode) {
             _ => {}
         },
 
+        // One key per standing decision. Anything unbound closes the palette
+        // rather than doing nothing, so a mistyped key never leaves you stuck
+        // in front of a list of ways to delete things.
+        Mode::Recipes => match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.mode = Mode::Browsing,
+            KeyCode::Up => app.move_recipe_cursor(-1),
+            KeyCode::Down => app.move_recipe_cursor(1),
+            KeyCode::Enter => app.apply_highlighted_recipe(),
+            // A recipe's own key wins over the vim aliases: a user who binds
+            // `j` gets their recipe, and the arrows still navigate.
+            KeyCode::Char(c) if app.recipes.iter().any(|r| r.key == c) => app.apply_recipe(c),
+            KeyCode::Char('k') => app.move_recipe_cursor(-1),
+            KeyCode::Char('j') => app.move_recipe_cursor(1),
+            _ => app.mode = Mode::Browsing,
+        },
+
         Mode::Browsing => match code {
             KeyCode::Char('q') => app.quit = true,
             // Esc backs out of things rather than quitting: leaving a tool that
@@ -356,6 +373,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 }
             }
             KeyCode::Char('?') => app.mode = Mode::Help,
+            KeyCode::Char('R') => app.mode = Mode::Recipes,
             KeyCode::Char('/') => app.mode = Mode::Search,
             KeyCode::Tab | KeyCode::BackTab => {
                 app.focus = if app.focus == Focus::Sidebar {

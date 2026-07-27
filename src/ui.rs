@@ -114,6 +114,7 @@ pub fn render(f: &mut Frame, app: &mut App, tick: u64) {
         Mode::Reaping => render_reaping(f, app),
         Mode::Report => render_report(f, app),
         Mode::Help => render_help(f),
+        Mode::Recipes => render_recipes(f, app),
         _ => {}
     }
 }
@@ -465,10 +466,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         "type to filter · enter keep · esc clear".to_string()
     } else {
         let full = format!(
-            "space pick · a all · o sort:{} · / find · d reap · ? help",
+            "R quick · space pick · a all · o sort:{} · / find · d reap · ? help",
             app.sort.label()
         );
-        let medium = "space pick · a all · d reap · ? help".to_string();
+        let medium = "R quick · space pick · a all · d reap · ? help".to_string();
         if full.chars().count() <= room {
             full
         } else if medium.chars().count() <= room {
@@ -802,7 +803,97 @@ fn render_report(f: &mut Frame, app: &App) {
     );
 }
 
+/// The quick-reap palette.
+///
+/// Every recipe shows what it would take before it is pressed. A recipe that
+/// covers nothing right now is dimmed rather than hidden: it is still part of
+/// what this tool can do, and a list that changes shape between runs is a list
+/// nobody learns.
+fn render_recipes(f: &mut Frame, app: &App) {
+    let rows: Vec<(&crate::recipes::Recipe, usize, u64)> = app
+        .recipes
+        .iter()
+        .map(|r| {
+            let (n, bytes) = app.recipe_yield(r);
+            (r, n, bytes)
+        })
+        .collect();
+
+    let area = centered(74, (rows.len() + 7) as u16, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::from("")];
+    for (i, (recipe, count, bytes)) in rows.iter().enumerate() {
+        let empty = *count == 0;
+        let here = i == app.recipe_idx.min(rows.len().saturating_sub(1));
+        let key_style = if empty {
+            Style::new().fg(DIM)
+        } else {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        };
+        let name_style = match (empty, here) {
+            (true, _) => Style::new().fg(DIM),
+            (false, true) => Style::new()
+                .fg(Color::Rgb(230, 237, 243))
+                .add_modifier(Modifier::BOLD),
+            (false, false) => Style::new().fg(Color::Rgb(200, 205, 215)),
+        };
+        let risk_colour = match recipe.max_risk {
+            Risk::Safe => SAFE,
+            Risk::Caution => CAUTION,
+            Risk::Danger => DANGER,
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(if here { " ▸ " } else { "   " }, Style::new().fg(ACCENT)),
+            Span::styled(format!("{}  ", recipe.key), key_style),
+            Span::styled(format!("{:<42}", recipe.name), name_style),
+            Span::styled(format!("{:>4}  ", count), Style::new().fg(DIM)),
+            Span::styled(
+                format!("{:>9}", human(*bytes)),
+                if empty {
+                    Style::new().fg(DIM)
+                } else {
+                    Style::new().fg(risk_colour).add_modifier(Modifier::BOLD)
+                },
+            ),
+        ]));
+    }
+
+    // The highlighted recipe's own sentence, the same way the item list swaps a
+    // description for the command that will actually run: the palette says what
+    // a key leaves behind, not only what it takes.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "   {}",
+            rows.get(app.recipe_idx.min(rows.len().saturating_sub(1)))
+                .map(|(r, _, _)| r.detail.as_str())
+                .unwrap_or("")
+        ),
+        Style::new().fg(SELECTED),
+    )));
+    lines.push(Line::from(Span::styled(
+        "   a key runs it · ↑↓ move · enter run · esc back",
+        Style::new().fg(DIM),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(ACCENT))
+                .title(Line::from(Span::styled(
+                    " Quick reap ",
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ))),
+        ),
+        area,
+    );
+}
+
 const KEYS: &[(&str, &str)] = &[
+    ("R", "quick reap — one key per standing decision"),
     ("↑ ↓  j k", "move"),
     ("← →  h l", "switch pane"),
     ("tab", "toggle pane"),

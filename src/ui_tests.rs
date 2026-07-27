@@ -234,6 +234,84 @@ fn preview() {
     println!("\n{}\n", draw(&mut app, 104, 24));
 }
 
+#[test]
+fn the_quick_reap_palette_shows_what_each_key_would_take() {
+    let mut app = fixture();
+    app.mode = Mode::Recipes;
+    let out = draw(&mut app, 104, 24);
+
+    assert!(out.contains("Quick reap"), "palette missing:\n{out}");
+    // The fixture holds one safe docker item of 17 GB, so the docker recipe
+    // has to show what pressing it would actually get back.
+    assert!(out.contains("Docker · safe"), "no docker recipe:\n{out}");
+    assert!(
+        out.contains("17.0 GB"),
+        "no figure against a recipe:\n{out}"
+    );
+}
+
+#[test]
+fn a_recipe_selects_across_categories_not_just_the_visible_list() {
+    let mut app = fixture();
+    // Looking at Docker only; the recipe covers everything safe regardless.
+    app.expanded.insert(Category::Docker);
+    app.rebuild();
+
+    app.apply_recipe('1');
+
+    assert_eq!(app.mode, Mode::Confirm);
+    assert_eq!(app.selected_count(), 1);
+    assert!(app.selected().all(|c| c.risk == Risk::Safe));
+}
+
+#[test]
+fn a_recipe_replaces_the_selection_rather_than_adding_to_it() {
+    let mut app = fixture();
+    for item in &mut app.items {
+        item.selected = true;
+    }
+
+    app.apply_recipe('1');
+
+    // Confirming must show what the key named, not what was already ticked.
+    assert_eq!(app.selected_count(), 1);
+}
+
+#[test]
+fn a_recipe_that_covers_nothing_says_so_instead_of_opening_an_empty_dialog() {
+    let mut app = fixture();
+    app.items.retain(|c| c.category != Category::Docker);
+    app.rebuild();
+
+    app.apply_recipe('d');
+
+    assert_eq!(app.mode, Mode::Browsing);
+    assert!(app.status.contains("nothing to reap"), "{}", app.status);
+}
+
+#[test]
+fn a_recipe_holding_irreversible_items_still_demands_the_typed_confirmation() {
+    let mut app = fixture();
+    app.apply_recipe('3');
+
+    assert_eq!(app.mode, Mode::Confirm);
+    assert!(app.has_irreversible());
+    assert!(
+        !app.confirm_satisfied(),
+        "one key must not bypass the acknowledgement typing reap exists for"
+    );
+}
+
+/// `cargo test preview_recipes -- --ignored --nocapture`
+#[test]
+#[ignore = "visual aid, not an assertion"]
+fn preview_recipes() {
+    let mut app = fixture();
+    app.mode = Mode::Recipes;
+    app.recipe_idx = 3;
+    println!("\n{}\n", draw(&mut app, 104, 20));
+}
+
 /// `cargo test preview_confirm -- --ignored --nocapture`
 #[test]
 #[ignore = "visual aid, not an assertion"]

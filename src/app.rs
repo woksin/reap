@@ -18,6 +18,8 @@ pub enum Mode {
     Reaping,
     Report,
     Help,
+    /// The quick-reap palette: one key per standing decision.
+    Recipes,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -94,6 +96,10 @@ pub struct App {
     /// The user's configuration, and where it lives, so `x` can persist.
     pub config: crate::config::Config,
     pub config_path: std::path::PathBuf,
+    /// One-key selections, built-in plus whatever the config adds.
+    pub recipes: Vec<crate::recipes::Recipe>,
+    /// Cursor in the palette, so the highlighted recipe can explain itself.
+    pub recipe_idx: usize,
 
     pub opts: ScanOpts,
     scan_rx: Option<Receiver<ScanEvent>>,
@@ -135,6 +141,8 @@ impl App {
             disk: std::env::current_dir()
                 .ok()
                 .and_then(|d| crate::util::disk_free(&d)),
+            recipes: crate::recipes::compile(&config),
+            recipe_idx: 0,
             config,
             config_path,
             opts,
@@ -405,6 +413,63 @@ impl App {
         for item in &mut self.items {
             item.selected = false;
         }
+    }
+
+    /// What a recipe would tick, without ticking it — so the palette can show
+    /// the payoff before the key is pressed.
+    pub fn recipe_yield(&self, recipe: &crate::recipes::Recipe) -> (usize, u64) {
+        self.items
+            .iter()
+            .filter(|i| recipe.covers(i))
+            .fold((0, 0), |(n, bytes), i| (n + 1, bytes + i.size))
+    }
+
+    pub fn move_recipe_cursor(&mut self, delta: isize) {
+        if self.recipes.is_empty() {
+            return;
+        }
+        let last = self.recipes.len() as isize - 1;
+        self.recipe_idx = (self.recipe_idx as isize + delta).clamp(0, last) as usize;
+    }
+
+    /// Run whichever recipe the palette cursor is on.
+    pub fn apply_highlighted_recipe(&mut self) {
+        if let Some(key) = self.recipes.get(self.recipe_idx).map(|r| r.key) {
+            self.apply_recipe(key);
+        }
+    }
+
+    /// Run a recipe: replace the selection with what it covers, and go
+    /// straight to the confirmation.
+    ///
+    /// Replacing rather than adding is the point — a recipe states the whole
+    /// of what to reap, and folding it into an existing selection would put
+    /// items in front of the confirm dialog that the key did not name.
+    /// Selection spans every item, not just the visible ones: "everything
+    /// docker can spare" means that whatever the sidebar is currently showing.
+    pub fn apply_recipe(&mut self, key: char) {
+        let Some(recipe) = self.recipes.iter().find(|r| r.key == key) else {
+            return;
+        };
+        let (name, covered): (String, Vec<bool>) = (
+            recipe.name.clone(),
+            self.items.iter().map(|i| recipe.covers(i)).collect(),
+        );
+
+        for (item, covered) in self.items.iter_mut().zip(covered) {
+            item.selected = covered;
+        }
+
+        let count = self.selected_count();
+        if count == 0 {
+            // Nothing to confirm, and dropping into an empty dialog would look
+            // like a failure rather than an empty result.
+            self.mode = Mode::Browsing;
+            self.status = format!("{name}: nothing to reap");
+            return;
+        }
+        self.status = format!("{name}: {count} items");
+        self.begin_confirm();
     }
 
     /// Select every item in view that is not irreversible — the "obvious wins".
