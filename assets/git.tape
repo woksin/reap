@@ -2,23 +2,37 @@
 #
 #   cargo build --release && vhs assets/git.tape
 #
-# Read-only: it expands the Git category and walks the four verdicts. No
-# selection, no confirm dialog, nothing deleted.
+# Alone among these recordings, this one films a fixture rather than the machine
+# it was made on — see assets/fixture.sh for why, and for how little of it is
+# actually pretend. Building it is part of the tape, so this renders from a
+# clean checkout with nothing set up first.
+#
+# Read-only: it expands a category and walks the four verdicts. No selection, no
+# confirm dialog, nothing deleted.
 
 Output assets/git.gif
 
 Source assets/_style.tape
+
+Hide
+Type "./assets/fixture.sh /tmp/reap-demo" Enter
+Sleep 25s
+# Overrides the machine config the shared style points at.
+Type "export XDG_CONFIG_HOME=$PWD/assets/fixture-config" Enter
+Type "clear" Enter
+Sleep 1s
+Show
 
 Sleep 1200ms
 Type "reap"
 Sleep 600ms
 Enter
 
-Sleep 4s
+Sleep 3500ms
 
-# Into Git, and open it up.
+# Into Git — the categories sit in a fixed order, not by size — and open it up.
 Down
-Sleep 1200ms
+Sleep 1400ms
 Enter
 Sleep 2200ms
 

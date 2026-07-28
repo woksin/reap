@@ -67,7 +67,7 @@ for f in sorted(glob.glob('seq/f*.png')):
 "
 ```
 
-That produced the exact timeline of the real run — Enter at 20.0s, reaping done by 23.0s,
+That produced the exact timeline of the real run — Enter at 21.0s, reaping done by 23.0s,
 static report after — which is what made a precise trim possible.
 
 **4. Only now record the real thing**, with sleeps sized for the slow case. Excess is easy
@@ -131,7 +131,7 @@ what lazygit, delta, atuin and yazi all converge on.
 - ✅ `gate.gif` — a dialog turning red and `enter confirm (locked)` releasing as the word
   is typed. A screenshot cannot show a lock releasing.
 - ✅ `git.gif` — four branch groups, four different verdicts, dots changing colour.
-- ✅ `find.gif` — 703 findings narrowing to 37 live, across categories.
+- ✅ `find.gif` — 99 findings narrowing to 12 live, across categories.
 - ❌ The quick-reap palette. It is a static list of ten recipes. The ASCII block already in
   the README says the same thing, is searchable, and loads instantly. It kept its place.
 
@@ -141,7 +141,7 @@ content — the risk-tier table under the confirm dialog, the verdict table unde
 browser. A mock deleted with nothing to replace it costs screen-reader users and anyone
 reading the raw file.
 
-**Watch the total weight.** Four GIFs, 3.8 MB. Short clips are what keep that reasonable.
+**Watch the total weight.** Four GIFs, 2.7 MB. Short clips are what keep that reasonable.
 
 ## Keeping private work out of shot
 
@@ -189,6 +189,44 @@ XDG_CONFIG_HOME=$PWD/assets/recording reap --json \
   | grep -iE 'PrivateRepo|other-private-name' | wc -l    # must be 0
 ```
 
+Grep the labels, then **read them**. A pattern list is only as good as the names you
+thought of, and the names you did not think of are the whole problem. Two got through here
+that no pattern covered: a Docker image called `<project>-fix-verify:latest` and a volume
+called `<project>_<other-project>-data`, neither of which sat under any excluded path and
+one of which differed in case from the pattern that should have caught it. Both were found
+by printing every non-anonymous label and looking at the list.
+
+Expect the regex to cry wolf, too — `archives` contains `hive`. That is fine. A check that
+over-reports costs you a second look; one that under-reports costs you a commit.
+
+### When exclusion leaves nothing to film
+
+Excluding enough can empty the shot. Every repository on this machine turned out to be
+either a client's or an employer's, which left the git recording with no subject at all.
+
+The answer was [`fixture.sh`](fixture.sh): a script that builds real repositories with real
+bare remotes and branches that are genuinely merged, squash-merged, pushed and unpushed,
+with backdated commits so the ages read like somewhere lived-in. The branch names are
+invented; nothing else is. Every verdict on screen is reached by `git cherry` against a
+genuine upstream, so a branch reap calls irreversible is irreversible because its commit
+exists in exactly one place.
+
+Two things make this honest rather than a mock-up. The caption says it is a fixture and
+links the script. And the script is committed and run by the tape itself, so the recording
+reproduces from a clean checkout — which a screenshot of somebody's real machine never
+does.
+
+Two traps worth knowing if you build one:
+
+- **reap refuses to call a directory build output without corroboration** — a `target` is
+  only a target next to a `Cargo.toml`. A fixture without the marker files is a fixture
+  reap will correctly ignore, and you will spend a while wondering why the category is
+  empty.
+- **`--path` does not narrow the scanners that do not take paths.** Docker and the cache
+  scanners read the whole machine regardless, so a fixture recording still needs them
+  turned off in its own config — otherwise the machine you were hiding walks back into
+  shot behind the thing you built.
+
 ## Recording something destructive
 
 `gate.gif` is the only one that selects work which exists nowhere else, and it was recorded
@@ -219,7 +257,7 @@ ffmpeg -i raw.gif -filter_complex "\
   -loop 0 assets/demo.gif
 ```
 
-65 seconds became 27.5. The `palettegen`/`paletteuse` pair is not optional even for a plain
+63.6 seconds became 27.5. The `palettegen`/`paletteuse` pair is not optional even for a plain
 trim — re-encoding a GIF without it produces visible banding on exactly the kind of flat
 dark UI a TUI is made of.
 
@@ -270,8 +308,15 @@ Work in this order and do not skip ahead:
    no remote, as out of shot. Put the exclusions in a recording-only config the tape points
    at through an env var, **gitignore that config** — an exclusion list committed to a
    public repo publishes the names it hides — and verify by grepping the tool's own output
-   for each name until the count is zero. Do this before the first real render: a committed
-   GIF is permanent, since replacing the file later leaves the old blob in history.
+   for each name until the count is zero, then read the remaining labels yourself, because
+   the names that leak are the ones no pattern was written for. Do this before the first
+   real render: a committed GIF is permanent, since replacing the file later leaves the old
+   blob in history.
+
+   If excluding everything private leaves a recording with nothing to show, build a
+   committed fixture script that constructs real state under neutral names, have the tape
+   run it, and say so in the caption. Constructed and labelled beats real and leaked, and
+   it reproduces from a clean checkout besides.
 
 5. **Rehearse before you commit to anything.** If a recording would delete, publish, deploy
    or otherwise change real state, first render it against a dry-run flag, a scratch

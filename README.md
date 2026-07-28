@@ -15,10 +15,10 @@
 
 <br>
 
-<img src="assets/demo.gif" alt="reap scanning a machine, sorting 695 items into safe, rebuildable and irreversible, then reaping the safe tier" width="900">
+<img src="assets/demo.gif" alt="reap scanning a machine, sorting 99 items into safe, rebuildable and irreversible, then reaping the safe tier" width="900">
 
-<sub>One real run on one real machine: 60.7 GB reclaimable, sorted by what it costs to lose it.<br>
-`f` narrows to the safe tier, `R` `1` takes all of it — 185 MB, none of it work.</sub>
+<sub>One real run on one real machine: 33.8 GB reclaimable, sorted by what it costs to lose it.<br>
+`f` narrows to the safe tier, `R` `1` takes all of it — 4.13 GB, none of it work.</sub>
 
 </div>
 
@@ -168,7 +168,7 @@ With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
 picks by default — `source/repos` and `Documents/GitHub`.
 
 Once you are in, `/` narrows the list as you type — across every category at once, so one
-query reaches build output, docker images and repositories together:
+query reaches docker's build cache and a package manager's on the same screen:
 
 <div align="center">
 <img src="assets/find.gif" alt="pressing / and typing to narrow hundreds of findings down to one project's worth" width="860">
@@ -256,7 +256,9 @@ deleting them** and groups them by the answer.
 </div>
 
 <sub>Four groups, four different answers. The last one holds commits that exist in this
-clone and nowhere else, and every entry says how many and where the upstream went.</sub>
+clone and nowhere else, and every entry says how many and where the upstream went.<br>
+Filmed against [a throwaway fixture](assets/fixture.sh) — invented branches, but real
+repositories with real remotes, and every verdict reached the way it would be on yours.</sub>
 
 | Group | Verdict | Risk |
 |---|---|---|

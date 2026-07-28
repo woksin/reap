@@ -1,0 +1,13 @@
+# Configuration for the git recording, which films assets/fixture.sh rather
+# than a real machine. Committed, unlike assets/recording/, because it names
+# nothing that is not in this repository already.
+#
+# Docker and the cache scanners are off: they read the whole machine no matter
+# what `--path` says, and this recording is meant to show one directory.
+
+[scan]
+roots = ["/tmp/reap-demo"]
+docker = false
+caches = false
+personal = false
+stale_days = 30

@@ -20,16 +20,16 @@ Sleep 4s
 Type "/"
 Sleep 700ms
 Set TypingSpeed 110ms
-Type "node_modules"
+Type "cache"
 Sleep 3s
 
-# It is not a per-category filter — the same query reaches docker images and
-# repositories too.
+# It is not a per-category filter — one query reaches docker's build cache and
+# a package manager's on the same screen.
 Escape
 Sleep 1200ms
 Type "/"
 Sleep 500ms
-Type "chronicle"
+Type "mongo"
 Sleep 3500ms
 
 Escape

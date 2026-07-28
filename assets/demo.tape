@@ -34,14 +34,10 @@ Sleep 4s
 
 # What it found, broken down by what it is.
 Down
-Sleep 1100ms
+Sleep 1600ms
 Down
-Sleep 1100ms
-Down
-Sleep 1100ms
-Down
-Sleep 1400ms
-Up 4
+Sleep 1800ms
+Up 2
 Sleep 1s
 
 # Narrow to the tier that costs nothing to lose.
