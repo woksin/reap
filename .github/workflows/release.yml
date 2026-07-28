@@ -3,7 +3,7 @@ name: Release
 # Cuts a release and attaches binaries for the platforms reap supports.
 #
 # The version is not kept in the repository. It comes from the label on the
-# merged pull request — `major`, `minor` or `patch` — which cratis/release-action
+# merged pull request — `major`, `minor` or `patch` — which the release step
 # turns into the next semantic version and a GitHub release. A merge carrying
 # none of those labels releases nothing, so this can run on every push without a
 # paths filter.

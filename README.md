@@ -687,8 +687,8 @@ earns its place.
 
 ### Specifications
 
-Behaviour is specified separately from the unit tests, following the convention used
-across the Cratis codebases: `for_<subject>` names what is under specification,
+Behaviour is specified separately from the unit tests: `for_<subject>` names what is
+under specification,
 `when_<scenario>` names the situation, and each `should_<expectation>` observes exactly one
 thing — so a failure reads as a sentence and names precisely what broke.
 
@@ -727,8 +727,7 @@ counting their bytes once.
 ### Releasing
 
 There is no version to bump. Label a pull request `major`, `minor` or `patch`, and merging
-it cuts the release: [cratis/release-action](https://github.com/cratis/release-action)
-works out the next semantic version, tags it, and the
+it cuts the release: the next semantic version is worked out and tagged, and the
 [release workflow](.github/workflows/release.yml) builds and attaches binaries for all four
 targets and pushes the Homebrew formula. The version is stamped into `Cargo.toml` at build
 time rather than committed, so `reap --version` reports the release it came from. A merge

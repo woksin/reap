@@ -5,10 +5,9 @@ Notable changes, newest first. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Versions are not set by hand. A merged pull request labelled `major`, `minor` or
-`patch` decides the next one, and
-[cratis/release-action](https://github.com/cratis/release-action) cuts the
-release from it — so the tag, the GitHub release and the binaries all come from
-that label. This file is the readable summary of what changed; the release notes
+`patch` decides the next one, and the
+[release workflow](.github/workflows/release.yml) cuts the release from it — so
+the tag, the GitHub release and the binaries all come from that label. This file is the readable summary of what changed; the release notes
 on each tag are the generated list of pull requests.
 
 ## [Unreleased]
