@@ -1,4 +1,7 @@
 target
 
+# Scratch space for local agent worktrees, which are created inside the repo.
+.claude/
+
 # Local exclusion config for the README recordings — never committed.
 assets/recording/

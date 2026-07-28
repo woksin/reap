@@ -116,7 +116,7 @@ impl a_docker_daemon {
         self
     }
 
-    /// One BuildKit layer record.
+    /// One `BuildKit` layer record.
     pub fn with_a_build_cache_record(mut self, size: &str, in_use: bool, shared: bool) -> Self {
         self.push(
             "BuildCache",
@@ -142,11 +142,11 @@ impl a_docker_daemon {
 
     /// Everything the docker scan reports for this daemon.
     pub fn candidates(self) -> Vec<Candidate> {
-        self.candidates_with(crate::config::Config::default())
+        self.candidates_with(&crate::config::Config::default())
     }
 
     /// The same, under a given configuration.
-    pub fn candidates_with(self, cfg: crate::config::Config) -> Vec<Candidate> {
+    pub fn candidates_with(self, cfg: &crate::config::Config) -> Vec<Candidate> {
         self.candidates_under(cfg, 0)
     }
 
@@ -154,12 +154,12 @@ impl a_docker_daemon {
     /// this scanner consults, and the reason an unreadable size must not be
     /// treated as a small one.
     pub fn candidates_above(self, min_size: u64) -> Vec<Candidate> {
-        self.candidates_under(crate::config::Config::default(), min_size)
+        self.candidates_under(&crate::config::Config::default(), min_size)
     }
 
-    fn candidates_under(self, cfg: crate::config::Config, min_size: u64) -> Vec<Candidate> {
+    fn candidates_under(self, cfg: &crate::config::Config, min_size: u64) -> Vec<Candidate> {
         let mut opts = scanning_everything(vec![]);
-        opts.rules = std::sync::Arc::new(crate::scan::Rules::from_config(&cfg));
+        opts.rules = std::sync::Arc::new(crate::scan::Rules::from_config(cfg));
         opts.min_size = min_size;
 
         let (tx, rx) = std::sync::mpsc::channel();
