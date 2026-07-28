@@ -91,6 +91,13 @@ struct BuildCache {
 /// unrecognised string 0 B would under-report each item — and hide the small
 /// items entirely, since they fall under `min_size` — on the day docker
 /// changes its output, with nothing anywhere saying so.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is checked finite and non-negative just above, and a \
+              float-to-int cast saturates, so an absurd figure clamps to \
+              u64::MAX rather than wrapping to a small one"
+)]
 pub(crate) fn parse_size(s: &str) -> Option<u64> {
     // A trailing `*` marks a figure docker shares between records.
     let s = s.trim().trim_end_matches('*').trim();
@@ -123,6 +130,12 @@ pub(crate) fn parse_size(s: &str) -> Option<u64> {
 }
 
 /// Turn docker's "4 days ago" into a day count.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "`n` is checked finite and non-negative and every multiplier is \
+              positive, and a float-to-int cast saturates rather than wraps"
+)]
 pub(crate) fn parse_since(s: &str) -> Option<u64> {
     let s = s.trim().trim_end_matches(" ago").trim();
     // Docker's shortest bucket, and the only one phrased as a sentence.
@@ -132,13 +145,14 @@ pub(crate) fn parse_since(s: &str) -> Option<u64> {
     let mut parts = s.split_whitespace();
     let head = parts.next()?;
     let unit = parts.next().unwrap_or("");
-    let n: f64 = if head.eq_ignore_ascii_case("about") || head.eq_ignore_ascii_case("a") {
-        1.0
-    } else {
-        head.parse().ok()?
-    };
-    let unit = if n == 1.0 && (head.eq_ignore_ascii_case("about") || head.eq_ignore_ascii_case("a"))
-    {
+    // "a day", "about an hour": the count is spelled rather than written as a
+    // digit, so the token already taken was the count and the unit is the next.
+    let spelled = head.eq_ignore_ascii_case("about") || head.eq_ignore_ascii_case("a");
+    let n: f64 = if spelled { 1.0 } else { head.parse().ok()? };
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
+    let unit = if spelled {
         parts.next().unwrap_or(unit)
     } else {
         unit

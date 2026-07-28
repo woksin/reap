@@ -2,6 +2,7 @@ use crate::model::{Action, Candidate, ReapEvent};
 use crate::scan::home_dir;
 use crate::trash;
 use rayon::prelude::*;
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
@@ -134,10 +135,10 @@ fn stash_index(args: &[String]) -> Option<u64> {
 /// Dropping a stash renumbers every stash below it, so `stash@{0}` followed by
 /// `stash@{1}` would delete something the user never selected. Running the
 /// highest index first leaves the lower ones where they were.
-fn command_order(action: &Action) -> i64 {
+fn command_order(action: &Action) -> Reverse<u64> {
     match action {
-        Action::Run { args, .. } => -(stash_index(args).unwrap_or(0) as i64),
-        Action::Remove(_) => 0,
+        Action::Run { args, .. } => Reverse(stash_index(args).unwrap_or(0)),
+        Action::Remove(_) => Reverse(0),
     }
 }
 

@@ -88,8 +88,7 @@ pub fn downloads(dir: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
             // Hidden entries here are the browser's bookkeeping, not the
             // user's files.
             !p.file_name()
-                .map(|n| n.to_string_lossy().starts_with('.'))
-                .unwrap_or(true)
+                .is_none_or(|n| n.to_string_lossy().starts_with('.'))
         })
         .collect();
 
@@ -168,8 +167,8 @@ pub fn device_backups(roots: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>
     let backups: Vec<PathBuf> = roots
         .iter()
         .filter_map(|root| std::fs::read_dir(root).ok())
-        .flat_map(|rd| rd.flatten())
-        .filter(|e| e.file_type().map(|f| f.is_dir()).unwrap_or(false))
+        .flat_map(Iterator::flatten)
+        .filter(|e| e.file_type().is_ok_and(|f| f.is_dir()))
         .map(|e| e.path())
         .collect();
 

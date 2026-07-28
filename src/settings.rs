@@ -37,10 +37,10 @@ pub enum Origin {
 }
 
 impl Origin {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Origin::Builtin => "built-in",
-            Origin::Yours => "yours",
+            Self::Builtin => "built-in",
+            Self::Yours => "yours",
         }
     }
 }
@@ -57,49 +57,49 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [
-        Section::Roots,
-        Section::Scanning,
-        Section::Caches,
-        Section::Artifacts,
-        Section::Ignores,
-        Section::Overrides,
-        Section::Recipes,
+    pub const ALL: [Self; 7] = [
+        Self::Roots,
+        Self::Scanning,
+        Self::Caches,
+        Self::Artifacts,
+        Self::Ignores,
+        Self::Overrides,
+        Self::Recipes,
     ];
 
-    pub fn title(self) -> &'static str {
+    pub const fn title(self) -> &'static str {
         match self {
-            Section::Roots => "Where to look",
-            Section::Scanning => "Scanning",
-            Section::Caches => "Caches",
-            Section::Artifacts => "Build artifacts",
-            Section::Ignores => "Never offer",
-            Section::Overrides => "Re-graded",
-            Section::Recipes => "Quick reaps",
+            Self::Roots => "Where to look",
+            Self::Scanning => "Scanning",
+            Self::Caches => "Caches",
+            Self::Artifacts => "Build artifacts",
+            Self::Ignores => "Never offer",
+            Self::Overrides => "Re-graded",
+            Self::Recipes => "Quick reaps",
         }
     }
 
     /// One line on what the section is for, shown under the heading.
-    pub fn blurb(self) -> &'static str {
+    pub const fn blurb(self) -> &'static str {
         match self {
-            Section::Roots => "directories searched for repositories and build output",
-            Section::Scanning => "thresholds, and which scanners run at all",
-            Section::Caches => "a path, what clears it, and what it costs to lose",
-            Section::Artifacts => "directory names, and the sibling file that proves what they are",
-            Section::Ignores => "patterns reap will never put in front of you",
-            Section::Overrides => "risk gradings you disagreed with",
-            Section::Recipes => "one key per standing decision · edit these in the config file",
+            Self::Roots => "directories searched for repositories and build output",
+            Self::Scanning => "thresholds, and which scanners run at all",
+            Self::Caches => "a path, what clears it, and what it costs to lose",
+            Self::Artifacts => "directory names, and the sibling file that proves what they are",
+            Self::Ignores => "patterns reap will never put in front of you",
+            Self::Overrides => "risk gradings you disagreed with",
+            Self::Recipes => "one key per standing decision · edit these in the config file",
         }
     }
 
     /// What `a` adds here, when the section takes additions at all.
-    pub fn adds(self) -> Option<&'static str> {
+    pub const fn adds(self) -> Option<&'static str> {
         match self {
-            Section::Roots => Some("a directory to search"),
-            Section::Caches => Some("a cache path"),
-            Section::Artifacts => Some("a build directory name"),
-            Section::Ignores => Some("a pattern never to offer"),
-            Section::Scanning | Section::Overrides | Section::Recipes => None,
+            Self::Roots => Some("a directory to search"),
+            Self::Caches => Some("a cache path"),
+            Self::Artifacts => Some("a build directory name"),
+            Self::Ignores => Some("a pattern never to offer"),
+            Self::Scanning | Self::Overrides | Self::Recipes => None,
         }
     }
 }
@@ -119,50 +119,50 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 9] = [
-        Setting::StaleDays,
-        Setting::MinSize,
-        Setting::Depth,
-        Setting::LibraryCacheFloor,
-        Setting::DownloadsFloor,
-        Setting::Docker,
-        Setting::Caches,
-        Setting::Personal,
-        Setting::Trash,
+    pub const ALL: [Self; 9] = [
+        Self::StaleDays,
+        Self::MinSize,
+        Self::Depth,
+        Self::LibraryCacheFloor,
+        Self::DownloadsFloor,
+        Self::Docker,
+        Self::Caches,
+        Self::Personal,
+        Self::Trash,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Setting::StaleDays => "stale after",
-            Setting::MinSize => "hide anything under",
-            Setting::Depth => "descend at most",
-            Setting::LibraryCacheFloor => "unnamed caches over",
-            Setting::DownloadsFloor => "downloads over",
-            Setting::Docker => "scan Docker",
-            Setting::Caches => "scan caches",
-            Setting::Personal => "scan your own files",
-            Setting::Trash => "trash instead of deleting",
+            Self::StaleDays => "stale after",
+            Self::MinSize => "hide anything under",
+            Self::Depth => "descend at most",
+            Self::LibraryCacheFloor => "unnamed caches over",
+            Self::DownloadsFloor => "downloads over",
+            Self::Docker => "scan Docker",
+            Self::Caches => "scan caches",
+            Self::Personal => "scan your own files",
+            Self::Trash => "trash instead of deleting",
         }
     }
 
-    pub fn detail(self) -> &'static str {
+    pub const fn detail(self) -> &'static str {
         match self {
-            Setting::StaleDays => "days untouched before something counts as stale",
-            Setting::MinSize => "the floor under everything reap reports",
-            Setting::Depth => "levels below each root",
-            Setting::LibraryCacheFloor => "the floor for caches no rule names",
-            Setting::DownloadsFloor => "the floor for entries in your download directory",
-            Setting::Docker => "images, containers, volumes, build cache",
-            Setting::Caches => "every [[cache]] rule, and the sweeps around them",
-            Setting::Personal => "downloads, installers, device backups",
-            Setting::Trash => "recoverable, but frees nothing until the trash is emptied",
+            Self::StaleDays => "days untouched before something counts as stale",
+            Self::MinSize => "the floor under everything reap reports",
+            Self::Depth => "levels below each root",
+            Self::LibraryCacheFloor => "the floor for caches no rule names",
+            Self::DownloadsFloor => "the floor for entries in your download directory",
+            Self::Docker => "images, containers, volumes, build cache",
+            Self::Caches => "every [[cache]] rule, and the sweeps around them",
+            Self::Personal => "downloads, installers, device backups",
+            Self::Trash => "recoverable, but frees nothing until the trash is emptied",
         }
     }
 
-    pub fn is_switch(self) -> bool {
+    pub const fn is_switch(self) -> bool {
         matches!(
             self,
-            Setting::Docker | Setting::Caches | Setting::Personal | Setting::Trash
+            Self::Docker | Self::Caches | Self::Personal | Self::Trash
         )
     }
 
@@ -174,25 +174,25 @@ impl Setting {
             None => (default.to_string(), Origin::Builtin),
         };
         match self {
-            Setting::StaleDays => number(scan.stale_days.map(|v| format!("{v} days")), "30 days"),
-            Setting::MinSize => number(scan.min_size.clone(), "1MB"),
-            Setting::Depth => number(scan.depth.map(|v| v.to_string()), "8"),
-            Setting::LibraryCacheFloor => number(scan.library_cache_floor.clone(), "200MB"),
-            Setting::DownloadsFloor => number(scan.downloads_floor.clone(), "100MB"),
-            Setting::Docker => switch(scan.docker, true),
-            Setting::Caches => switch(scan.caches, true),
-            Setting::Personal => switch(scan.personal, true),
-            Setting::Trash => switch(scan.trash, false),
+            Self::StaleDays => number(scan.stale_days.map(|v| format!("{v} days")), "30 days"),
+            Self::MinSize => number(scan.min_size.clone(), "1MB"),
+            Self::Depth => number(scan.depth.map(|v| v.to_string()), "8"),
+            Self::LibraryCacheFloor => number(scan.library_cache_floor.clone(), "200MB"),
+            Self::DownloadsFloor => number(scan.downloads_floor.clone(), "100MB"),
+            Self::Docker => switch(scan.docker, true),
+            Self::Caches => switch(scan.caches, true),
+            Self::Personal => switch(scan.personal, true),
+            Self::Trash => switch(scan.trash, false),
         }
     }
 
     /// True when a switch is on, whether by choice or by default.
     pub fn is_on(self, cfg: &Config) -> bool {
         match self {
-            Setting::Docker => cfg.scan.docker.unwrap_or(true),
-            Setting::Caches => cfg.scan.caches.unwrap_or(true),
-            Setting::Personal => cfg.scan.personal.unwrap_or(true),
-            Setting::Trash => cfg.scan.trash.unwrap_or(false),
+            Self::Docker => cfg.scan.docker.unwrap_or(true),
+            Self::Caches => cfg.scan.caches.unwrap_or(true),
+            Self::Personal => cfg.scan.personal.unwrap_or(true),
+            Self::Trash => cfg.scan.trash.unwrap_or(false),
             _ => true,
         }
     }
@@ -210,7 +210,7 @@ fn on_off(v: bool) -> String {
 }
 
 /// One line on the screen.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Row {
     Heading(Section),
     Root(usize),
@@ -225,16 +225,16 @@ pub enum Row {
 }
 
 impl Row {
-    pub fn section(&self) -> Section {
+    pub const fn section(&self) -> Section {
         match self {
-            Row::Heading(s) | Row::Add(s) => *s,
-            Row::Root(_) => Section::Roots,
-            Row::Setting(_) => Section::Scanning,
-            Row::Cache(..) => Section::Caches,
-            Row::Artifact(..) => Section::Artifacts,
-            Row::Ignore(_) => Section::Ignores,
-            Row::Override(_) => Section::Overrides,
-            Row::Recipe(..) => Section::Recipes,
+            Self::Heading(s) | Self::Add(s) => *s,
+            Self::Root(_) => Section::Roots,
+            Self::Setting(_) => Section::Scanning,
+            Self::Cache(..) => Section::Caches,
+            Self::Artifact(..) => Section::Artifacts,
+            Self::Ignore(_) => Section::Ignores,
+            Self::Override(_) => Section::Overrides,
+            Self::Recipe(..) => Section::Recipes,
         }
     }
 }
@@ -247,7 +247,7 @@ pub struct Edit {
 }
 
 /// What a completed edit writes to.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Target {
     /// `None` while adding, `Some(i)` while changing one that exists.
     Root(Option<usize>),
@@ -358,8 +358,7 @@ impl Settings {
         if self.rows.is_empty() {
             return;
         }
-        let last = self.rows.len() as isize - 1;
-        self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
+        self.cursor = crate::util::offset(self.cursor, delta, self.rows.len() - 1);
     }
 
     pub fn toggle_section(&mut self, cfg: &Config) {
@@ -411,7 +410,7 @@ impl Settings {
     }
 
     /// How many rules a section holds, for the count beside its heading.
-    pub fn count(&self, cfg: &Config, section: Section) -> usize {
+    pub const fn count(&self, cfg: &Config, section: Section) -> usize {
         match section {
             Section::Roots => cfg.scan.roots.len(),
             Section::Scanning => Setting::ALL.len(),
@@ -520,7 +519,11 @@ impl Settings {
 
         let outcome = match &edit.target {
             Target::Root(Some(i)) => {
-                *cfg.scan.roots.get_mut(*i).ok_or("that root is gone")? = text.clone();
+                cfg.scan
+                    .roots
+                    .get_mut(*i)
+                    .ok_or("that root is gone")?
+                    .clone_from(&text);
                 format!("searching {text}")
             }
             Target::Root(None) => {
@@ -528,13 +531,17 @@ impl Settings {
                 // Said rather than refused: a directory that does not exist yet
                 // is a legitimate thing to configure ahead of creating it, and
                 // is also exactly what a typo looks like.
-                match crate::config::expand(&text).is_dir() {
-                    true => format!("searching {text}"),
-                    false => format!("added {text} — nothing there yet"),
+                if crate::config::expand(&text).is_dir() {
+                    format!("searching {text}")
+                } else {
+                    format!("added {text} — nothing there yet")
                 }
             }
             Target::Ignore(Some(i)) => {
-                *cfg.ignore.get_mut(*i).ok_or("that pattern is gone")? = text.clone();
+                cfg.ignore
+                    .get_mut(*i)
+                    .ok_or("that pattern is gone")?
+                    .clone_from(&text);
                 format!("never offering {text}")
             }
             Target::Ignore(None) => {
@@ -544,7 +551,11 @@ impl Settings {
                 format!("never offering {text}")
             }
             Target::CachePath(Some(i)) => {
-                cfg.caches.get_mut(*i).ok_or("that rule is gone")?.path = text.clone();
+                cfg.caches
+                    .get_mut(*i)
+                    .ok_or("that rule is gone")?
+                    .path
+                    .clone_from(&text);
                 format!("cache path is now {text}")
             }
             Target::CachePath(None) => {
@@ -552,11 +563,19 @@ impl Settings {
                 format!("added {text} — n renames it, g changes what it costs")
             }
             Target::CacheLabel(i) => {
-                cfg.caches.get_mut(*i).ok_or("that rule is gone")?.label = text.clone();
+                cfg.caches
+                    .get_mut(*i)
+                    .ok_or("that rule is gone")?
+                    .label
+                    .clone_from(&text);
                 format!("renamed to {text}")
             }
             Target::ArtifactDir(Some(i)) => {
-                cfg.artifacts.get_mut(*i).ok_or("that rule is gone")?.dir = text.clone();
+                cfg.artifacts
+                    .get_mut(*i)
+                    .ok_or("that rule is gone")?
+                    .dir
+                    .clone_from(&text);
                 format!("build directory is now {text}")
             }
             Target::ArtifactDir(None) => {
@@ -711,7 +730,7 @@ fn new_cache_rule(path: &str) -> CacheRule {
     }
 }
 
-fn name_of(risk: RiskName) -> &'static str {
+const fn name_of(risk: RiskName) -> &'static str {
     match risk {
         RiskName::Safe => "safe",
         RiskName::Rebuildable => "rebuildable",
@@ -722,15 +741,15 @@ fn name_of(risk: RiskName) -> &'static str {
 /// Parse and store one `[scan]` value.
 fn apply_setting(cfg: &mut Config, setting: Setting, text: &str) -> Result<String, String> {
     let size = |text: &str| -> Result<String, String> {
-        // `parse_size` reads what it can and shrugs at the rest, which is right
-        // for a config file read once at startup and wrong for a value someone
-        // is watching themselves type.
+        // Stricter than `parse_size` on its own, which accepts a leading `.`.
+        // That is tolerable in a config file and not what someone typing a
+        // floor into a box means.
         if !text.starts_with(|c: char| c.is_ascii_digit()) {
             return Err(format!("{text:?} does not start with a number, e.g. 100MB"));
         }
-        // A genuine zero is a legitimate floor; anything else reading as zero
-        // did not parse, and would silently widen the scan rather than narrow it.
-        if crate::parse_size(text) == 0 && !text.trim_start_matches('0').is_empty() {
+        // `parse_size` refuses what it cannot read, so a genuine `0` still
+        // passes as the legitimate floor it is while `10XB` does not.
+        if crate::parse_size(text).is_none() {
             return Err(format!("{text:?} is not a size reap understands"));
         }
         Ok(text.to_string())
@@ -749,7 +768,7 @@ fn apply_setting(cfg: &mut Config, setting: Setting, text: &str) -> Result<Strin
             Ok(format!("{label} {text} days"))
         }
         Setting::Depth => {
-            cfg.scan.depth = Some(count(text)? as usize);
+            cfg.scan.depth = Some(usize::try_from(count(text)?).unwrap_or(usize::MAX));
             Ok(format!("{label} {text} levels"))
         }
         Setting::MinSize => {
@@ -812,7 +831,7 @@ pub fn effective_risk(cfg: &Config, pattern: &str, declared: RiskName) -> (RiskN
 /// Cycling off the end removes the override rather than pinning the declared
 /// value, so a rule re-graded and then put back is indistinguishable from one
 /// never touched — and picks up a corrected default in a later release.
-pub fn next_grade(current: Option<RiskName>) -> Option<RiskName> {
+pub const fn next_grade(current: Option<RiskName>) -> Option<RiskName> {
     match current {
         None => Some(RiskName::Safe),
         Some(RiskName::Safe) => Some(RiskName::Rebuildable),

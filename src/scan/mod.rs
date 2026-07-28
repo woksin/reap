@@ -63,20 +63,25 @@ impl Rules {
                 .map(|o| (crate::config::IgnoreSet::new(&o.matches), o.risk.into()))
                 .collect(),
             never_descend,
+            // An unreadable figure falls back to the documented default rather
+            // than to zero: getting this wrong lowers the floor, and a lower
+            // floor means more things offered for deletion.
             library_cache_floor: cfg
                 .scan
                 .library_cache_floor
                 .as_deref()
-                .map(crate::parse_size)
+                .and_then(crate::parse_size)
                 .unwrap_or(200 * 1_000_000),
             // Higher than the general floor on purpose. Everything in the
             // download directory is a judgement call the user has to make one
             // at a time, so the list has to be short enough to actually read.
+            // As with the cache floor, an unreadable figure falls back to the
+            // documented default rather than to zero.
             downloads_floor: cfg
                 .scan
                 .downloads_floor
                 .as_deref()
-                .map(crate::parse_size)
+                .and_then(crate::parse_size)
                 .unwrap_or(100 * 1_000_000),
         }
     }
@@ -258,8 +263,7 @@ pub fn discover_repos(opts: &ScanOpts) -> Vec<PathBuf> {
             .filter(|n| *n == ".git")
             .and_then(|_| store.parent())
             .filter(|p| p.is_dir())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| repo.clone());
+            .map_or_else(|| repo.clone(), Path::to_path_buf);
         by_store.entry(store).or_insert(canonical);
     }
     by_store.into_values().collect()
@@ -437,7 +441,7 @@ mod tests {
                 "",
                 1,
                 Risk::Safe,
-                Action::Remove(std::path::PathBuf::from(path)),
+                Action::Remove(PathBuf::from(path)),
             )
         };
         emit(&tx, &opts, make("/work/project/skip-me"));
@@ -478,7 +482,7 @@ mod tests {
                 "",
                 1,
                 Risk::Caution,
-                Action::Remove(std::path::PathBuf::from("/work/project/x")),
+                Action::Remove(PathBuf::from("/work/project/x")),
             )
         };
         emit(&tx, &opts, make(Category::Artifacts, "node_modules"));
@@ -585,7 +589,7 @@ mod tests {
                 "",
                 1,
                 Risk::Caution,
-                Action::Remove(std::path::PathBuf::from("/a/b/c")),
+                Action::Remove(PathBuf::from("/a/b/c")),
             ),
         );
         drop(tx);

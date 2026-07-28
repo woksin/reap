@@ -26,8 +26,7 @@ pub fn scan(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     repos.par_iter().for_each_with(tx.clone(), |tx, repo| {
         let name = repo
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| tilde(repo));
+            .map_or_else(|| tilde(repo), |n| n.to_string_lossy().into_owned());
         let _ = tx.send(ScanEvent::Status(format!("git: {name}")));
 
         branches(repo, &name, opts, tx);
@@ -53,8 +52,7 @@ fn default_branch(repo: &Path) -> String {
         }
     }
     git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "main".into())
+        .map_or_else(|| "main".into(), |s| s.trim().to_string())
 }
 
 fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
@@ -136,44 +134,17 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
 
         // Work out what actually survives deleting this branch, rather than
         // inferring it from the branch's name or its tracking status.
-        let (group, detail, risk, force) = match survives(repo, &branch, &merge_base, is_merged) {
-            Survives::Merged => (
-                "merged branches",
-                format!("already merged into {merge_base}"),
-                Risk::Safe,
-                false,
-            ),
-            Survives::PatchesUpstream { commits } => (
-                "squash-merged branches",
-                format!(
-                    "all {commits} commits are already in {merge_base} by content — squash- or rebase-merged"
-                ),
-                Risk::Safe,
-                true,
-            ),
-            Survives::OnRemote { commits, remote } => (
-                "pushed branches",
-                format!(
-                    "{commits} unmerged commits, all pushed to {remote} — recoverable from the remote"
-                ),
-                Risk::Caution,
-                true,
-            ),
-            Survives::LocalOnly { commits } => (
-                "unpushed branches",
-                // A "gone" upstream no longer exists, so naming it as merely
-                // lacking the commits would misdescribe what happened.
-                if is_gone {
-                    format!("{commits} commits exist only here — upstream {upstream} was deleted")
-                } else if upstream.is_empty() {
-                    format!("{commits} commits exist only here — never pushed anywhere")
-                } else {
-                    format!("{commits} commits exist only here — {upstream} does not have them")
-                },
-                Risk::Danger,
-                true,
-            ),
-        };
+        let Verdict {
+            group,
+            detail,
+            risk,
+            force,
+        } = grade(
+            survives(repo, &branch, &merge_base, is_merged),
+            &merge_base,
+            &upstream,
+            is_gone,
+        );
 
         let flag = if force { "-D" } else { "-d" };
         let cand = Candidate::new(
@@ -191,6 +162,62 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
         )
         .with_age(Some(age));
         super::emit(tx, opts, cand);
+    }
+}
+
+/// How a branch is filed, described and graded once we know what survives it.
+struct Verdict {
+    /// Sub-bucket in the sidebar, e.g. "merged branches".
+    group: &'static str,
+    /// The reason, in the words shown next to the branch.
+    detail: String,
+    risk: Risk,
+    /// Whether git needs `-D` rather than `-d` to let go of it.
+    force: bool,
+}
+
+/// Put what survives deleting a branch into words, and grade the risk of it.
+///
+/// Split out from the walk so the wording and the grading of a branch can be
+/// read — and argued about — without the listing and filtering around it.
+fn grade(survives: Survives, merge_base: &str, upstream: &str, is_gone: bool) -> Verdict {
+    match survives {
+        Survives::Merged => Verdict {
+            group: "merged branches",
+            detail: format!("already merged into {merge_base}"),
+            risk: Risk::Safe,
+            force: false,
+        },
+        Survives::PatchesUpstream { commits } => Verdict {
+            group: "squash-merged branches",
+            detail: format!(
+                "all {commits} commits are already in {merge_base} by content — squash- or rebase-merged"
+            ),
+            risk: Risk::Safe,
+            force: true,
+        },
+        Survives::OnRemote { commits, remote } => Verdict {
+            group: "pushed branches",
+            detail: format!(
+                "{commits} unmerged commits, all pushed to {remote} — recoverable from the remote"
+            ),
+            risk: Risk::Caution,
+            force: true,
+        },
+        Survives::LocalOnly { commits } => Verdict {
+            group: "unpushed branches",
+            // A "gone" upstream no longer exists, so naming it as merely
+            // lacking the commits would misdescribe what happened.
+            detail: if is_gone {
+                format!("{commits} commits exist only here — upstream {upstream} was deleted")
+            } else if upstream.is_empty() {
+                format!("{commits} commits exist only here — never pushed anywhere")
+            } else {
+                format!("{commits} commits exist only here — {upstream} does not have them")
+            },
+            risk: Risk::Danger,
+            force: true,
+        },
     }
 }
 
@@ -300,11 +327,12 @@ struct Worktree {
     bare: bool,
 }
 
-fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
-    let Some(out) = git(repo, &["worktree", "list", "--porcelain"]) else {
-        return;
-    };
-
+/// Read `git worktree list --porcelain`.
+///
+/// Each record opens with a `worktree` line and the attributes that follow
+/// belong to it, so anything before the first one is ignored rather than
+/// guessed at.
+fn parse_worktree_list(out: &str) -> Vec<Worktree> {
     let mut trees: Vec<Worktree> = Vec::new();
     for line in out.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
@@ -324,6 +352,15 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
             }
         }
     }
+    trees
+}
+
+fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let Some(out) = git(repo, &["worktree", "list", "--porcelain"]) else {
+        return;
+    };
+
+    let trees = parse_worktree_list(&out);
 
     // The first entry is the main working tree; it is the repository itself.
     for wt in trees.iter().skip(1) {
@@ -368,8 +405,7 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
         // Removing a worktree deletes its working directory outright, so both
         // uncommitted files and commits held only here are lost with it.
         let dirty = git(&wt.path, &["status", "--porcelain"])
-            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0);
+            .map_or(0, |s| s.lines().filter(|l| !l.trim().is_empty()).count());
         let unpushed = match &wt.branch {
             Some(b) => rev_count(repo, &["rev-list", "--count", b, "--not", "--remotes"]),
             // A detached HEAD is unreachable from any ref once the worktree goes.

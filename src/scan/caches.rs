@@ -11,9 +11,7 @@ fn unnamed_cache_root(home: &std::path::Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Caches")
     } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".cache"))
+        std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home.join(".cache"), PathBuf::from)
     }
 }
 
@@ -35,14 +33,11 @@ fn app_data_roots(home: &std::path::Path) -> Vec<PathBuf> {
         );
     } else {
         roots.push(
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config")),
+            std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from),
         );
         roots.push(
             std::env::var_os("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local/share")),
+                .map_or_else(|| home.join(".local/share"), PathBuf::from),
         );
     }
     roots.retain(|r| r.is_dir());
@@ -246,7 +241,7 @@ fn collect_app_caches(
     };
     for entry in rd.flatten() {
         // `is_dir` is false for symlinks, which keeps cycles out of the walk.
-        if !entry.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|f| f.is_dir()) {
             continue;
         }
         let name = entry.file_name();
@@ -318,7 +313,7 @@ fn collect_unnamed(dir: &std::path::Path, named: &[PathBuf], depth: usize, out: 
     };
     for entry in rd.flatten() {
         // `is_dir` is false for symlinks, which keeps cycles out of the walk.
-        if !entry.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|f| f.is_dir()) {
             continue;
         }
         let name = entry.file_name();

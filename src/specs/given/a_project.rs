@@ -36,13 +36,13 @@ impl a_project {
 
     /// Everything the artifact scanner reports for this project.
     pub fn candidates(self) -> Vec<Candidate> {
-        self.candidates_with(crate::config::Config::default())
+        self.candidates_with(&crate::config::Config::default())
     }
 
     /// The same, under a given configuration.
-    pub fn candidates_with(self, cfg: crate::config::Config) -> Vec<Candidate> {
+    pub fn candidates_with(self, cfg: &crate::config::Config) -> Vec<Candidate> {
         let mut opts = scanning_everything(vec![self.dir.path.clone()]);
-        opts.rules = std::sync::Arc::new(crate::scan::Rules::from_config(&cfg));
+        opts.rules = std::sync::Arc::new(crate::scan::Rules::from_config(cfg));
 
         let (tx, rx) = std::sync::mpsc::channel();
         crate::scan::artifacts::scan(&opts, &tx);

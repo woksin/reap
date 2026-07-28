@@ -82,6 +82,12 @@ on each tag are the generated list of pull requests.
   a rule naming `~/Library/Caches/Google/Chrome` did not stop the sweep from
   also offering `~/Library/Caches/Google` whole, so the same bytes appeared
   twice under two labels and were counted twice in the headline figure.
+- `--min-size` now refuses a value it cannot read instead of quietly carrying
+  on. `--min-size garbage` used to become zero, which removed the size floor
+  altogether, and an unknown unit like `50XB` used to mean 50 bytes; both now
+  stop the run and say so. A `library_cache_floor` or `downloads_floor` in the
+  configuration file that cannot be read falls back to its documented default
+  rather than to zero.
 
 > [!IMPORTANT]
 > The `Personal` category is on by default, and installers in your download
@@ -91,6 +97,12 @@ on each tag are the generated list of pull requests.
 > your downloads, and every device backup — is reachable that way at any risk
 > ceiling below `irreversible`. Add `--no-personal`, or `personal = false`
 > under `[scan]`, to keep automation to exactly what it took before.
+
+### Fixed
+
+- Docker's "about a minute ago" was parsed through a redundant float comparison
+  that could not be relied on; the age of a Docker item is now settled by the
+  wording alone, and a nonsensical count is rejected rather than rounded.
 
 ## [1.0.0]
 
