@@ -688,7 +688,7 @@ earns its place.
 ### Specifications
 
 Behaviour is specified separately from the unit tests, following the convention used
-across the Cratis and Ada codebases: `for_<subject>` names what is under specification,
+across the Cratis codebases: `for_<subject>` names what is under specification,
 `when_<scenario>` names the situation, and each `should_<expectation>` observes exactly one
 thing — so a failure reads as a sentence and names precisely what broke.
 
