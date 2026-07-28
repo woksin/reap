@@ -30,9 +30,11 @@ strip = true
 codegen-units = 1
 
 [lints.rust]
-# Nothing here needs it, and a tool that deletes files should have to justify
-# reaching for it in a pull request rather than in a review comment.
-unsafe_code = "forbid"
+# A tool that deletes files should have to justify reaching for `unsafe` in the
+# diff rather than in a review comment. `deny` rather than `forbid` so the one
+# place that genuinely needs it — the Win32 call for free disk space — can say
+# so in place, with its reason; `forbid` cannot be excepted at all.
+unsafe_code = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unused_qualifications = "warn"
 

@@ -133,6 +133,8 @@ mod unix {
     /// Record the original location so a desktop file manager can restore it.
     #[cfg(not(target_os = "macos"))]
     fn write_trashinfo(files_dir: &Path, name: &str, original: &Path) {
+        use std::fmt::Write as _;
+
         let Some(base) = files_dir.parent() else {
             return;
         };
@@ -143,7 +145,10 @@ mod unix {
             match byte {
                 b'/' | b'-' | b'_' | b'.' | b'~' => encoded.push(byte as char),
                 b if b.is_ascii_alphanumeric() => encoded.push(b as char),
-                b => encoded.push_str(&format!("%{b:02X}")),
+                // Writing to a String cannot fail, so there is no error to carry.
+                b => {
+                    let _ = write!(encoded, "%{b:02X}");
+                }
             }
         }
         let body = format!(
@@ -158,7 +163,8 @@ mod unix {
         // Days-since-epoch to a civil date, so no date crate is needed for one field.
         let secs = crate::util::now_secs();
         let (days, rem) = (secs / 86_400, secs % 86_400);
-        let (mut y, mut d) = (1970i64, days as i64);
+        // Seconds since the epoch divided by 86_400; nowhere near i64's range.
+        let (mut y, mut d) = (1970i64, i64::try_from(days).unwrap_or(i64::MAX));
         loop {
             let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
             let len = if leap { 366 } else { 365 };
@@ -256,7 +262,7 @@ mod windows {
         // Passed through the environment rather than interpolated into the
         // script, so a path containing a quote — or anything else PowerShell
         // would read as syntax — is data and cannot become code.
-        const SCRIPT: &str = r#"
+        const SCRIPT: &str = r"
 $ErrorActionPreference = 'Stop'
 try {
   Add-Type -AssemblyName Microsoft.VisualBasic
@@ -272,7 +278,7 @@ try {
   [Console]::Error.WriteLine($_.Exception.Message)
   exit 1
 }
-"#;
+";
 
         let out = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])

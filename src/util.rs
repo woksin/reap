@@ -148,6 +148,11 @@ pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
 /// structure, which makes the declaration unambiguous — the reason it is worth
 /// doing here and not for anything more elaborate.
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows reports free space only through Win32; there is no safe \
+              std equivalent, and the call is justified at its SAFETY comment"
+)]
 pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -171,7 +176,14 @@ pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
     let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
     // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call, and
     // the three out-parameters are distinct, initialised, correctly sized locals.
-    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) };
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut available,
+            &raw mut total,
+            &raw mut free,
+        )
+    };
     (ok != 0).then_some((available, total))
 }
 
