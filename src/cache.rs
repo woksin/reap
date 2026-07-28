@@ -1,10 +1,17 @@
 //! Persisted directory sizes, so a rescan does not re-walk millions of inodes.
 //!
-//! An entry is trusted only while the directory's own mtime is unchanged *and*
-//! the measurement is recent. That mtime moves when direct children are added
-//! or removed but not when a file deep inside is rewritten, so the check alone
-//! would eventually go stale — hence the time limit as well. `--no-cache`
-//! forces a fresh measurement.
+//! An entry is trusted only while the directory's own mtime is unchanged, its
+//! direct entries are the same ones, *and* the measurement is recent. None of
+//! the three catches everything on its own: the mtime does not move when a file
+//! deep inside is rewritten, the entry list does not change when a child is
+//! rewritten in place, and neither notices a slow drift — hence the time limit
+//! as well. `--no-cache` forces a fresh measurement.
+//!
+//! The entry list is what makes this correct on Windows. NTFS updates a
+//! directory's own timestamp lazily, so a child added moments after a
+//! measurement can leave the mtime looking untouched, and a size cache that
+//! trusted the mtime alone would report the old figure — in a tool whose whole
+//! job is reporting sizes.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +26,11 @@ struct Entry {
     size: u64,
     mtime: u64,
     measured_at: u64,
+    /// Absent in caches written before this was recorded, which is why it is an
+    /// option rather than a bare number: an entry that never had one cannot be
+    /// vouched for, so it is measured again once and written back complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entries: Option<u64>,
 }
 
 #[derive(Default)]
@@ -52,6 +64,32 @@ fn mtime_of(path: &Path) -> Option<u64> {
         .map(|d| d.as_nanos() as u64)
 }
 
+/// A fingerprint of the directory's direct entries, by name.
+///
+/// One shallow `read_dir` — a rounding error against the recursive walk it
+/// exists to avoid — and it changes exactly when a child is added, removed or
+/// renamed. Names only: rewriting a file in place leaves the fingerprint alone,
+/// which is the reuse this cache is for.
+///
+/// Combined with xor so the filesystem's iteration order cannot change the
+/// answer. Names within one directory are unique, so nothing cancels out.
+fn entries_of(path: &Path) -> Option<u64> {
+    const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut combined: u64 = 0;
+    for entry in std::fs::read_dir(path).ok()? {
+        let name = entry.ok()?.file_name();
+        let mut h = BASIS;
+        for b in name.as_encoded_bytes() {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(PRIME);
+        }
+        combined ^= h;
+    }
+    Some(combined)
+}
+
 impl SizeCache {
     pub fn load(enabled: bool) -> Self {
         let entries = if enabled {
@@ -76,11 +114,14 @@ impl SizeCache {
         }
         let now = crate::util::now_secs();
         let mtime = mtime_of(path);
+        let listing = entries_of(path);
 
         if let Some(mtime) = mtime
             && let Ok(entries) = self.entries.lock()
             && let Some(e) = entries.get(path)
             && e.mtime == mtime
+            && e.entries.is_some()
+            && e.entries == listing
             && now.saturating_sub(e.measured_at) < MAX_AGE_SECS
         {
             return e.size;
@@ -96,6 +137,7 @@ impl SizeCache {
                     size,
                     mtime,
                     measured_at: now,
+                    entries: listing,
                 },
             );
             if let Ok(mut d) = self.dirty.lock() {
@@ -178,9 +220,67 @@ mod tests {
         let cache = SizeCache::load(true);
         assert_eq!(cache.size_of(&target), 4096);
 
-        // Adding a child moves the directory's own mtime.
         std::fs::write(target.join("b.bin"), vec![0u8; 4096]).unwrap();
         assert_eq!(cache.size_of(&target), 8192, "must re-measure");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remeasures_when_a_child_appears_without_the_mtime_moving() {
+        // The Windows case, and the reason the entry list is recorded at all.
+        // NTFS updates a directory's own timestamp lazily, so a child added
+        // just after a measurement can leave the mtime looking untouched. This
+        // reproduces that on any filesystem by making the cache's record agree
+        // with the directory's current timestamp, which is what a deferred
+        // update looks like from in here.
+        let root = scratch("lazy-mtime");
+        let target = root.join("artifacts");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.bin"), vec![0u8; 4096]).unwrap();
+
+        let cache = SizeCache::load(true);
+        assert_eq!(cache.size_of(&target), 4096);
+
+        std::fs::write(target.join("b.bin"), vec![0u8; 4096]).unwrap();
+
+        // Pretend the directory's timestamp never moved.
+        let unmoved = mtime_of(&target).unwrap();
+        {
+            let mut entries = cache.entries.lock().unwrap();
+            entries.get_mut(&target).unwrap().mtime = unmoved;
+        }
+
+        assert_eq!(
+            cache.size_of(&target),
+            8192,
+            "an unchanged mtime must not vouch for a changed directory"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_entry_from_an_older_cache_is_measured_again() {
+        // Written before the entry list was recorded, so there is nothing to
+        // check it against and it cannot be trusted on its word alone.
+        let root = scratch("legacy");
+        let target = root.join("artifacts");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("a.bin"), vec![0u8; 4096]).unwrap();
+
+        let cache = SizeCache::load(true);
+        cache.entries.lock().unwrap().insert(
+            target.clone(),
+            Entry {
+                size: 1,
+                mtime: mtime_of(&target).unwrap(),
+                measured_at: crate::util::now_secs(),
+                entries: None,
+            },
+        );
+
+        assert_eq!(cache.size_of(&target), 4096, "must not trust the old shape");
 
         std::fs::remove_dir_all(&root).ok();
     }
