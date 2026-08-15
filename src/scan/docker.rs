@@ -358,6 +358,13 @@ fn build_cache(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         .build_cache
         .iter()
         .filter(|b| b.in_use == "false" && b.shared == "false")
+        // The prune action below carries the same age filter. Restricting the
+        // displayed total too keeps a stale record from making recent cache
+        // look as though it is part of the promised reclaimable figure.
+        .filter(|b| {
+            opts.stale_days == 0
+                || parse_since(&b.last_used_since).is_some_and(|age| age >= opts.stale_days)
+        })
         .collect();
     if reclaimable.is_empty() {
         return;
@@ -379,6 +386,19 @@ fn build_cache(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         .filter_map(|b| parse_since(&b.last_used_since))
         .max();
 
+    let mut args = vec![
+        "builder".into(),
+        "prune".into(),
+        "--all".into(),
+        "--force".into(),
+    ];
+    if opts.stale_days > 0 {
+        args.extend([
+            "--filter".into(),
+            format!("until={}h", opts.stale_days.saturating_mul(24)),
+        ]);
+    }
+
     let cand = Candidate::new(
         Category::Docker,
         "build cache",
@@ -397,12 +417,7 @@ fn build_cache(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         Risk::Safe,
         Action::Run {
             program: "docker".into(),
-            args: vec![
-                "builder".into(),
-                "prune".into(),
-                "--all".into(),
-                "--force".into(),
-            ],
+            args,
             cwd: None,
         },
     )

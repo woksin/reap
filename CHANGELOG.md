@@ -24,11 +24,12 @@ on each tag are the generated list of pull requests.
   `Program Files`, `ProgramData` and `$Recycle.Bin` rather than against unix
   paths.
 - **A `Personal` category** — old downloads, installers and phone backups.
-  Nothing in it regenerates itself, so nothing in it is guessed at: anything
-  announcing itself as an installer (`.dmg`, `.exe`, `.pkg`, `.iso`, `.msi`,
-  `.deb`, `.rpm`) is graded rebuildable, and **everything else is graded
-  irreversible** — which keeps it out of `s`, out of every safe recipe, out of
-  an unattended `--reap`, and behind the typed confirmation. Device backups are
+  Nothing in it regenerates itself, so nothing in it is guessed at. Installer
+  extensions (`.dmg`, `.exe`, `.pkg`, `.iso`, `.msi`, `.deb`, `.rpm`) make a
+  useful review group but cannot prove another copy exists, so **everything is
+  graded irreversible by default** — which keeps it out of `s`, out of every
+  safe recipe, out of unattended reaping below the irreversible ceiling, and
+  behind typed confirmation in the interface. Device backups are
   named after the device rather than its identifier. `--no-personal` or
   `personal = false` under `[scan]` turns it off.
 - **Caches for the rest of the machine.** Chrome, Firefox, Safari, Edge and
@@ -43,7 +44,7 @@ on each tag are the generated list of pull requests.
   `~/Library/Application Support`, `~/.config`, `%APPDATA%` and
   `%LOCALAPPDATA%` for those names exactly, grouped by the app that owns them.
 - **A settings screen, on `C`.** Every rule reap is working from — scan roots,
-  thresholds, all ninety cache rules, the build rules, your ignores, your
+  thresholds, all built-in cache rules, the build rules, your ignores, your
   re-gradings and the recipes — with where each came from and whether it is on.
   `e` changes a path, pattern or value, `n` renames one of yours, `a` adds one,
   `x` turns a rule off *and back on*, `g` re-grades what something costs, `d`
@@ -56,8 +57,8 @@ on each tag are the generated list of pull requests.
 - **A legend, on `L`**, drawn over whatever screen you are on and dismissed by
   any key — so what a triangle means can be settled without losing your place
   in a list of four hundred items. `reap guide` prints it too.
-- Two recipes for a machine that is not primarily a build machine: `a` for the
-  caches applications simply rebuild, and `i` for installers already run.
+- A recipe for a machine that is not primarily a build machine: `a` for the
+  caches applications simply rebuild.
 - `%VARIABLE%` in a cache rule's `path`, alongside `~`. A variable this machine
   does not have expands to a path that is not there, so one rule table covers
   three operating systems the same way `~/Library/Caches/...` already covered
@@ -89,16 +90,30 @@ on each tag are the generated list of pull requests.
   rather than to zero.
 
 > [!IMPORTANT]
-> The `Personal` category is on by default, and installers in your download
-> directory are graded `rebuildable`. An existing unattended
-> `reap --reap --risk rebuildable --yes` will therefore start removing old
-> installers it did not touch before. Nothing graded irreversible — the rest of
-> your downloads, and every device backup — is reachable that way at any risk
-> ceiling below `irreversible`. Add `--no-personal`, or `personal = false`
-> under `[scan]`, to keep automation to exactly what it took before.
+> The built-in `i` installer recipe has been removed because a filename cannot
+> prove another copy exists. Scripts using `--recipe i` now fail instead of
+> deleting installer-shaped downloads. Define an explicit custom recipe and
+> risk override only for files you know can be downloaded again.
 
 ### Fixed
 
+- Branches containing merge commits no longer receive a safe squash/rebase
+  verdict from `git cherry`, which omits merge commits. Git and remote-check
+  failures in the safety calculation now fail closed rather than becoming a
+  zero-commit safe result.
+- Worktree checks include ignored files. A clean worktree is removed without
+  `--force`; any uncommitted or ignored content is graded irreversible.
+- `stale_days` is now applied at the common scanner exit, including artifacts,
+  caches and Docker objects with measurable ages. BuildKit pruning carries the
+  same `until` filter as the displayed total so recent cache is not swept up.
+- Installer-looking downloads are irreversible by default; the unsafe
+  installer recipe has been removed.
+- Linux downloads use the XDG user directory and Windows uses the Downloads
+  Known Folder, with the conventional home-directory path as a fallback.
+- Repository discovery honors the configured depth, recognizes bare and nested
+  or hidden repositories, and no longer stops at an arbitrary depth of five.
+- Artifact matching tries every same-named rule instead of allowing one rule to
+  shadow another. Maven `target` and Swift `.build` are included explicitly.
 - Docker's "about a minute ago" was parsed through a redundant float comparison
   that could not be relied on; the age of a Docker item is now settled by the
   wording alone, and a nonsensical count is rejected rather than rounded.

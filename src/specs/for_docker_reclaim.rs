@@ -314,6 +314,30 @@ mod when_every_reclaimable_build_cache_record_is_unreadable {
     }
 }
 
+mod when_build_cache_has_a_staleness_threshold {
+    use super::*;
+
+    static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
+        a_docker_daemon::reporting_nothing()
+            .with_a_build_cache_record_last_used("700MB", false, false, "45 days ago")
+            .with_a_build_cache_record_last_used("300MB", false, false, "5 days ago")
+            .candidates_stale_for(30)
+    });
+
+    #[test]
+    fn should_count_only_cache_older_than_the_threshold() {
+        assert_eq!(in_group(&BECAUSE, "build cache")[0].size, 700_000_000);
+    }
+
+    #[test]
+    fn should_pass_the_same_threshold_to_docker() {
+        assert_eq!(
+            in_group(&BECAUSE, "build cache")[0].action.describe(),
+            "docker builder prune --all --force --filter until=720h"
+        );
+    }
+}
+
 mod when_there_is_no_reclaimable_build_cache {
     use super::*;
 

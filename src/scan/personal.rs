@@ -6,12 +6,10 @@
 //! the only copy of something, and reap has no way to tell those apart by
 //! looking at the bytes.
 //!
-//! So it does not try. It sorts on the one signal that is actually reliable —
-//! whether the thing announces itself as an installer — and grades everything
-//! else irreversible, which keeps it out of `s`, out of every safe recipe, and
-//! behind the typed confirmation. The value is not that reap decides; it is
-//! that eleven gigabytes of forgotten disk images stop hiding among the
-//! holiday photos.
+//! So it does not try. Installer-shaped names are grouped to make review easier,
+//! but a suffix cannot prove a file is downloadable: a custom ISO or a locally
+//! built executable may be the only copy. Every personal file therefore stays
+//! irreversible unless the user explicitly re-grades it.
 
 use super::ScanOpts;
 use crate::model::{Action, Candidate, Category, Risk, ScanEvent};
@@ -20,11 +18,10 @@ use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-/// Extensions that only ever mean "something you installed or mounted".
+/// Extensions that make an entry useful to review as an installer.
 ///
-/// The list is deliberately short. Every entry here is downgraded from
-/// irreversible to rebuildable, so a wrong guess is the one mistake in this
-/// file that could actually cost someone their work.
+/// This changes only its group and explanation, never its risk. An extension is
+/// not evidence that another copy still exists.
 const INSTALLER_EXTENSIONS: &[&str] = &[
     "dmg",
     "pkg",
@@ -49,18 +46,156 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
 
 /// The user's download directory.
 ///
-/// `XDG_DOWNLOAD_DIR` is what a Linux desktop sets when the folder has been
-/// renamed or moved; everywhere else it is `~/Downloads`.
+/// Linux resolves the XDG user directory, Windows asks the Known Folder API, and
+/// other platforms fall back to `~/Downloads`. A direct `XDG_DOWNLOAD_DIR`
+/// environment value wins everywhere for scripts and unusual sessions.
 pub fn downloads_dir() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("XDG_DOWNLOAD_DIR") {
         let path = PathBuf::from(configured);
-        if path.is_dir() {
+        if usable_download_dir(&path) {
             return Some(path);
         }
     }
-    super::home_dir()
-        .map(|h| h.join("Downloads"))
-        .filter(|p| p.is_dir())
+
+    let home = super::home_dir()?;
+    platform_downloads_dir(&home)
+        .filter(|path| usable_download_dir(path))
+        .or_else(|| {
+            let fallback = home.join("Downloads");
+            usable_download_dir(&fallback).then_some(fallback)
+        })
+}
+
+/// Treating the home directory itself as Downloads would put every top-level
+/// personal file in front of a delete key. XDG uses `$HOME` to mean that a user
+/// directory is disabled, so reject that value explicitly.
+fn usable_download_dir(path: &Path) -> bool {
+    if !path.is_dir() || !path.is_absolute() {
+        return false;
+    }
+    let Some(home) = super::home_dir() else {
+        return true;
+    };
+    if path == home {
+        return false;
+    }
+    match (std::fs::canonicalize(path), std::fs::canonicalize(home)) {
+        (Ok(path), Ok(home)) => path != home,
+        _ => true,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_downloads_dir(home: &Path) -> Option<PathBuf> {
+    let from_command = std::process::Command::new("xdg-user-dir")
+        .arg("DOWNLOAD")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let path = PathBuf::from(raw.trim());
+            (!path.as_os_str().is_empty()).then_some(path)
+        });
+    from_command.or_else(|| {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map_or_else(|| home.join(".config"), PathBuf::from)
+            .join("user-dirs.dirs");
+        let body = std::fs::read_to_string(config).ok()?;
+        parse_xdg_download_dir(&body, home)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_xdg_download_dir(body: &str, home: &Path) -> Option<PathBuf> {
+    let value = body
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("XDG_DOWNLOAD_DIR="))?
+        .trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value);
+    let rest = value
+        .strip_prefix("$HOME")
+        .or_else(|| value.strip_prefix("${HOME}"));
+    if let Some(rest) = rest {
+        return Some(home.join(rest.trim_start_matches('/')));
+    }
+    (!value.contains('$')).then(|| PathBuf::from(value))
+}
+
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows exposes a redirected Downloads directory through the \
+              Known Folder API; the allocation and UTF-16 reads are justified \
+              at their SAFETY comments"
+)]
+fn platform_downloads_dir(_home: &Path) -> Option<PathBuf> {
+    use std::ffi::{OsString, c_void};
+    use std::os::windows::ffi::OsStringExt;
+
+    #[repr(C)]
+    struct Guid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    const DOWNLOADS: Guid = Guid {
+        data1: 0x374d_e290,
+        data2: 0x123f,
+        data3: 0x4565,
+        data4: [0x91, 0x64, 0x39, 0xc4, 0x92, 0x5e, 0x46, 0x7b],
+    };
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHGetKnownFolderPath(
+            folder: *const Guid,
+            flags: u32,
+            token: *mut c_void,
+            path: *mut *mut u16,
+        ) -> i32;
+    }
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoTaskMemFree(memory: *const c_void);
+    }
+
+    let downloads = DOWNLOADS;
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: `DOWNLOADS` is the documented FOLDERID_Downloads GUID, the token
+    // is null for the current user, and `raw` is a valid out-pointer.
+    let result = unsafe {
+        SHGetKnownFolderPath(&raw const downloads, 0, std::ptr::null_mut(), &raw mut raw)
+    };
+    if result < 0 || raw.is_null() {
+        return None;
+    }
+
+    let mut len = 0;
+    // SAFETY: a successful call returns a NUL-terminated UTF-16 allocation.
+    unsafe {
+        while *raw.add(len) != 0 {
+            len += 1;
+        }
+    }
+    // SAFETY: the preceding loop found the terminator inside that allocation.
+    let path = PathBuf::from(OsString::from_wide(unsafe {
+        std::slice::from_raw_parts(raw, len)
+    }));
+    // SAFETY: the API documents this allocation as owned by CoTaskMemFree.
+    unsafe { CoTaskMemFree(raw.cast()) };
+    Some(path)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+const fn platform_downloads_dir(_home: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// Is this the name of something that was installed rather than authored?
@@ -112,16 +247,14 @@ pub fn downloads(dir: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
             .to_string_lossy()
             .into_owned();
 
-        let (group, risk, detail) = if is_installer(&name) {
+        let (group, detail) = if is_installer(&name) {
             (
                 "installers",
-                Risk::Caution,
-                "an installer · whatever it installs is already installed, or was never wanted",
+                "looks like an installer, but reap cannot prove another copy exists",
             )
         } else {
             (
                 "downloads",
-                Risk::Danger,
                 "reap cannot tell whether this exists anywhere else",
             )
         };
@@ -132,7 +265,7 @@ pub fn downloads(dir: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
             name,
             format!("{} · {detail}", tilde(path)),
             size,
-            risk,
+            Risk::Danger,
             Action::Remove(path.clone()),
         )
         .with_age(Some(age));
@@ -281,5 +414,16 @@ mod tests {
         std::fs::write(dir.join("Info.plist"), "<plist><dict/></plist>").unwrap();
         assert!(!device_name(&dir).is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_download_directory_is_read_from_user_dirs_configuration() {
+        let home = Path::new("/home/me");
+        let body = "XDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Incoming\"\n";
+        assert_eq!(
+            parse_xdg_download_dir(body, home),
+            Some(home.join("Incoming"))
+        );
     }
 }

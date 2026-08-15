@@ -362,18 +362,19 @@ never_descend = [
 # repos, src, Developer, Projects, code, dev, work, git.
 # roots = ["~/work", "~/oss"]
 
-# stale_days = 30                # untouched this long before it counts as stale
+# stale_days = 30                # minimum age where reap can measure one
 # min_size = "1MB"               # hide anything smaller
 # depth = 8                      # how deep to descend from each root
 # library_cache_floor = "200MB"  # floor for unnamed application caches
 # downloads_floor = "100MB"      # floor for entries in your download directory
-# trash = false                  # move to the Trash instead of deleting
+# trash = false                  # trash path removals; commands are unchanged
 # docker = true                  # set false to skip the Docker scan
 # caches = true                  # set false to skip the cache scan
 
 # Your own files: old downloads, installers, phone backups. Everything here is
-# graded irreversible unless it announces itself as an installer, so nothing in
-# it is ever taken by `s`, by a safe recipe, or by an unattended `--reap`.
+# graded irreversible: a filename cannot prove an installer is publicly
+# downloadable or that a disk image is not unique. Nothing here is taken by
+# `s`, a safe recipe, or unattended `--reap` below the irreversible ceiling.
 # Set false to leave your own files out of the scan entirely.
 # personal = true
 

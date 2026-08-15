@@ -11,7 +11,7 @@
 [![Release](https://img.shields.io/github/v/release/woksin/reap?color=86efac)](https://github.com/woksin/reap/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-**Find and prune the stale things eating your disk — and know which ones you can actually afford to lose.**
+**Find and assess common stale developer and application data — then prune only what you can afford to lose.**
 
 <br>
 
@@ -39,7 +39,8 @@ account for. Some of it is genuinely finished. Some of it is the only copy of an
 afternoon's work. **They look identical**, and that is why the disk never gets cleaned:
 the cost of guessing wrong is worse than the disk being full.
 
-reap tells them apart.
+reap evaluates the cases it knows how to prove, and shows the rest as decisions rather
+than pretending to be a universal disk oracle.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -154,7 +155,7 @@ reap --list               # print findings and exit
 reap --dry-run            # interface, but deletion is simulated
 reap --trash              # move paths to the Trash instead of deleting them
 reap -p ~/work -p ~/oss   # scan specific directories
-reap --stale-days 90      # only call things stale after 90 days
+reap --stale-days 90      # require 90 days where an age can be measured
 reap --min-size 100MB     # hide the small fry
 reap --no-docker          # skip the Docker scan
 reap --no-personal        # skip downloads, installers and device backups
@@ -212,7 +213,6 @@ After the first couple of runs, the ticking is the same ticking. `R` opens the r
 │   D  Docker · everything but the volumes         66    25.5 GB         │
 │   c  Caches                                       8    16.8 GB         │
 │   a  Apps · what they will simply rebuild        34    9.28 GB         │
-│   i  Installers you have already run              6    4.10 GB         │
 │                                                                        │
 │   merged and squash-merged · already in the integration branch         │
 │   a key runs it · ↑↓ move · enter run · esc back                       │
@@ -248,8 +248,8 @@ the other. Reuse a built-in key and yours takes it over.
 
 ## The interesting part: git prunability
 
-Branches and worktrees are not merely listed. reap works out **what actually survives
-deleting them** and groups them by the answer.
+Branches and worktrees are not merely listed. reap checks whether their work is reachable
+from the integration branch or a remote, and groups them by the evidence it can establish.
 
 <div align="center">
 <img src="assets/git.gif" alt="expanding the Git category and stepping through stale worktrees, merged, pushed and unpushed branches" width="860">
@@ -263,7 +263,7 @@ repositories with real remotes, and every verdict reached the way it would be on
 | Group | Verdict | Risk |
 |---|---|---|
 | `merged branches` | reachable from the integration branch | 🟢 safe |
-| `squash-merged branches` | not an ancestor, but every patch is already upstream | 🟢 safe |
+| `squash-merged branches` | linear history; every non-merge patch is already upstream | 🟢 safe |
 | `pushed branches` | unmerged, but every commit is on a remote | 🟡 rebuildable |
 | `unpushed branches` | commits exist in this clone and **nowhere else** | 🔴 irreversible |
 
@@ -271,13 +271,14 @@ repositories with real remotes, and every verdict reached the way it would be on
 > The squash-merge case is why this matters, and it is the case a squash-merge workflow
 > creates constantly. A squash-merged PR leaves a local branch that `git branch --merged`
 > calls unmerged and whose upstream is gone — it *looks* dangerous while every line of its
-> work is already in `main`. reap settles it with `git cherry`, which compares patch ids
-> and so sees through the rewritten SHAs. Conversely, a branch whose upstream was deleted
-> while it still holds local commits is genuinely dangerous, and gets flagged rather than
-> waved through.
+> work is already in `main`. For linear histories, reap settles it with `git cherry`, which
+> compares patch ids and so sees through rewritten SHAs. A history containing merge commits
+> never receives that shortcut, because `git cherry` does not report the merge commits
+> themselves. A failed patch or remote-safety check never produces a safe verdict; when
+> reap cannot prove recoverability, it grades the branch irreversible.
 
-Worktrees are judged on both axes that lose work: uncommitted files, and commits no remote
-can reach. One is only called safe to prune when both are zero.
+Worktrees are judged on both axes that lose work: uncommitted or ignored files, and commits
+no remote can reach. One is only called safe to prune when all are absent.
 
 ## What else it finds
 
@@ -286,8 +287,8 @@ can reach. One is only called safe to prune when both are zero.
 
 <br>
 
-`node_modules`, `target`, `bin`/`obj`, `dist`, `.next`, `.venv`, `.gradle`, `Pods`,
-`__pycache__` and ~20 more.
+`node_modules`, Rust and Maven `target`, Swift `.build`, `bin`/`obj`, `dist`, `.next`,
+`.venv`, `.gradle`, `Pods`, `__pycache__` and dozens more.
 
 Each is reported only when a **sibling file proves what it is**: a `target` next to a
 `Cargo.toml`, a `bin` next to a `.csproj`. A directory that merely happens to be called
@@ -322,14 +323,14 @@ changes its output.
 **Developer tools** — npm, pnpm, yarn, bun, NuGet, Maven, Gradle, cargo, Go, pip, uv,
 Homebrew, Xcode DerivedData and device support, Playwright and Puppeteer browsers.
 
-**Everything else on the machine** — Chrome, Firefox, Safari, Edge and Brave caches
+**Common application caches** — Chrome, Firefox, Safari, Edge and Brave caches
 (never a profile: you stay signed in); Adobe's media cache, waveform and Camera Raw
 files, After Effects' disk cache, DaVinci Resolve's render cache, Blender; Spotify's
 stream cache and its offline downloads; Steam shader caches and part-downloads; Windows
 temporary files, crash dumps, shader caches and the Recycle Bin.
 
-**Every Electron app at once.** Slack, Discord, Teams, VS Code, Figma, Notion, Postman —
-each carries a Chromium, and each Chromium writes `Cache`, `Code Cache` and `GPUCache`
+**Chromium/Electron-shaped caches.** Slack, Discord, Teams, VS Code, Figma, Notion,
+Postman and similar apps can write `Cache`, `Code Cache` and `GPUCache`
 into the app's own data directory, where no platform's cache sweep ever looks. reap walks
 `~/Library/Application Support`, `~/.config`, `%APPDATA%` and `%LOCALAPPDATA%` for those
 names exactly, and reports them grouped by the app that owns them.
@@ -356,11 +357,12 @@ This is the one category where reap has no proof to work from. A `target` beside
 a 4 GB file in Downloads is either an installer for something you already installed or
 the only copy of a wedding video, and nothing in the filesystem tells those apart.
 
-So reap does not guess. Anything announcing itself as an installer — `.dmg`, `.exe`,
-`.pkg`, `.iso`, `.msi`, `.deb`, `.rpm` — is **rebuildable**, because the worst case is
-downloading it again. **Everything else is irreversible**, and that is a mechanism rather
-than a warning label: irreversible items are never taken by `s`, never by a safe recipe,
-never by an unattended `--reap`, and never without the word `reap` being typed.
+So reap does not guess. An installer-looking suffix — `.dmg`, `.exe`, `.pkg`, `.iso`,
+`.msi`, `.deb`, `.rpm` — is useful for grouping, but cannot prove the file is public or
+that another copy exists. **Every Personal candidate is therefore irreversible by
+default.** You can re-grade a known-redownloadable item in the configuration; until then
+it is never taken by `s`, a safe recipe, or unattended `--reap` below the irreversible
+ceiling, and the interface requires the typed confirmation.
 
 Device backups get the same treatment, and are named after the device rather than its
 identifier — `Sara's iPhone`, not `00008030-001C4D...` — because the question you are
@@ -429,6 +431,10 @@ container are still separate filesystems here.
 If a path cannot be trashed, reap reports the failure rather than silently falling back to
 an unrecoverable delete.
 
+`--trash` applies only to filesystem path removals. Command actions — Git branch and
+worktree operations, Docker prune/remove commands, and tool-specific cache cleaners — run
+normally and do not become recoverable merely because `--trash` is present.
+
 ### Estimated vs actual
 
 Per-item figures are measured directory sizes, so the total is an *estimate*. The report
@@ -438,9 +444,10 @@ the scan.
 
 ## Configuration
 
-Nothing reap knows is baked in. Which directories count as build output, which caches are
-worth offering, what never to descend into, which key reaps what — all of it comes from
-`~/.config/reap/config.toml` (or `$XDG_CONFIG_HOME`), seeded with the built-in defaults.
+The built-in rule tables are exposed to the configuration layer. Which directories count
+as build output, which caches are worth offering, what never to descend into, and which
+key reaps what can all be extended, disabled, replaced or re-graded through
+`~/.config/reap/config.toml` (or `$XDG_CONFIG_HOME`).
 
 ```bash
 reap --write-config     # documented starter file
@@ -450,8 +457,8 @@ Command-line flags override the config, which overrides the defaults.
 
 ### `C` — all of it, on screen
 
-All of that was configurable and almost none of it was visible. Ninety cache rules, thirty
-build rules, a dozen recipes and five thresholds decide what you are shown, and the only
+All of that was configurable and almost none of it was visible. Dozens of cache and build
+rules, the recipes and scan thresholds decide what you are shown, and the only
 way to read any of it was to open the source. `C` puts the whole lot on one screen:
 
 ```
@@ -555,7 +562,9 @@ Ignoring beats re-grading: something you said never to offer stays unoffered.
 
 ## Platforms
 
-macOS, Linux and Windows, tested on all three in CI.
+macOS, Linux and Windows, tested on representative targets for all three in CI. That means
+the supported code paths build and run in CI; it does not mean every filesystem layout,
+vendor cache location or enterprise policy is known.
 
 Rules naming a path a machine does not have simply do not apply, so one rule set covers
 all of them — the Xcode entries are inert on Linux, the `~/.cache/*` ones on macOS, the
@@ -568,6 +577,7 @@ the branching. The pieces that genuinely differ:
 | Trash | `~/.Trash`, `<mount>/.Trashes/<uid>` | freedesktop `Trash/files` + `.trashinfo` | the shell's Recycle Bin |
 | Unnamed caches | `~/Library/Caches` | `$XDG_CACHE_HOME`, else `~/.cache` | — |
 | App data caches | `~/Library/Application Support` | `~/.config`, `~/.local/share` | `%APPDATA%`, `%LOCALAPPDATA%` |
+| Downloads | `~/Downloads` | XDG user directory, then `~/Downloads` | Windows Known Folder API |
 | Free space via | `df` | `df` | `GetDiskFreeSpaceExW` |
 | `i` reveals via | Finder | `xdg-open` | Explorer |
 
@@ -582,6 +592,26 @@ being a component of its own.
 > restorable from it in the ordinary way. The shell does not report back where it put
 > anything, so reap cannot offer to empty afterwards what it just put there — the `e` key
 > on the report is macOS and Linux only.
+
+### Coverage boundaries
+
+reap is a curated scanner, not a whole-disk indexer. With no `--path`, repository and
+artifact discovery starts only in the conventional roots listed under [Use](#use), and
+stops at the configured depth. It recognizes bare repositories, linked worktrees,
+submodules and nested or hidden checkouts that fall within those roots, but does not cross
+symlinked directories or directories it cannot read.
+
+Artifact and cache detection comes from finite rule tables plus the configurable unnamed
+cache sweep. New toolchains, renamed vendor directories, network storage, cloud-only data,
+arbitrary temporary folders and files outside those roots are not automatically covered.
+Docker findings come from the Docker CLI's current context and the builder/system view it
+reports; Podman, containerd and other runtimes are outside this scanner.
+
+`stale_days` is enforced whenever a scanner has a meaningful age. Some objects, notably
+Docker volumes and dangling networks, do not expose one in the data reap reads; they stay
+visible so “unknown age” is not quietly treated as “recent.” Permissions, unavailable Git
+remotes and absent tools can also limit what can be verified, so review the displayed
+evidence before deletion—especially anything irreversible.
 
 ## Keys
 
@@ -730,7 +760,7 @@ counting their bytes once.
 
 There is no version to bump. Label a pull request `major`, `minor` or `patch`, and merging
 it cuts the release: the next semantic version is worked out and tagged, and the
-[release workflow](.github/workflows/release.yml) builds and attaches binaries for all four
+[release workflow](.github/workflows/release.yml) builds and attaches binaries for all six
 targets and pushes the Homebrew formula. The version is stamped into `Cargo.toml` at build
 time rather than committed, so `reap --version` reports the release it came from. A merge
 with none of those labels releases nothing.

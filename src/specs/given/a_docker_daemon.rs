@@ -117,7 +117,18 @@ impl a_docker_daemon {
     }
 
     /// One `BuildKit` layer record.
-    pub fn with_a_build_cache_record(mut self, size: &str, in_use: bool, shared: bool) -> Self {
+    pub fn with_a_build_cache_record(self, size: &str, in_use: bool, shared: bool) -> Self {
+        self.with_a_build_cache_record_last_used(size, in_use, shared, "5 days ago")
+    }
+
+    /// One `BuildKit` layer record with an explicit last-use age.
+    pub fn with_a_build_cache_record_last_used(
+        mut self,
+        size: &str,
+        in_use: bool,
+        shared: bool,
+        last_used_since: &str,
+    ) -> Self {
         self.push(
             "BuildCache",
             json!({
@@ -125,7 +136,7 @@ impl a_docker_daemon {
                 "Size": size,
                 "InUse": in_use.to_string(),
                 "Shared": shared.to_string(),
-                "LastUsedSince": "5 days ago",
+                "LastUsedSince": last_used_since,
                 "CreatedSince": "5 days ago",
                 "UsageCount": "1",
             }),
@@ -147,20 +158,31 @@ impl a_docker_daemon {
 
     /// The same, under a given configuration.
     pub fn candidates_with(self, cfg: &crate::config::Config) -> Vec<Candidate> {
-        self.candidates_under(cfg, 0)
+        self.candidates_under(cfg, 0, 0)
     }
 
     /// The same, with a floor under what is worth reporting — the one option
     /// this scanner consults, and the reason an unreadable size must not be
     /// treated as a small one.
     pub fn candidates_above(self, min_size: u64) -> Vec<Candidate> {
-        self.candidates_under(&crate::config::Config::default(), min_size)
+        self.candidates_under(&crate::config::Config::default(), min_size, 0)
     }
 
-    fn candidates_under(self, cfg: &crate::config::Config, min_size: u64) -> Vec<Candidate> {
+    /// The same, after a candidate has been unused for at least `stale_days`.
+    pub fn candidates_stale_for(self, stale_days: u64) -> Vec<Candidate> {
+        self.candidates_under(&crate::config::Config::default(), 0, stale_days)
+    }
+
+    fn candidates_under(
+        self,
+        cfg: &crate::config::Config,
+        min_size: u64,
+        stale_days: u64,
+    ) -> Vec<Candidate> {
         let mut opts = scanning_everything(vec![]);
         opts.rules = std::sync::Arc::new(crate::scan::Rules::from_config(cfg));
         opts.min_size = min_size;
+        opts.stale_days = stale_days;
 
         let (tx, rx) = std::sync::mpsc::channel();
         crate::scan::docker::candidates_from_df(self.df.to_string().as_bytes(), &opts, &tx);

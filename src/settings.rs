@@ -2,7 +2,7 @@
 //! change it without leaving.
 //!
 //! reap's behaviour has always been entirely configurable and almost entirely
-//! invisible. Ninety cache rules, thirty artifact rules, a dozen recipes and
+//! invisible. Dozens of cache and artifact rules, the recipes and
 //! five thresholds decide what you are shown, and the only way to read any of
 //! it was to open the source or to guess from what appeared. Two consequences
 //! followed. Someone whose setup did not match the built-in assumptions had no
@@ -155,7 +155,7 @@ impl Setting {
             Self::Docker => "images, containers, volumes, build cache",
             Self::Caches => "every [[cache]] rule, and the sweeps around them",
             Self::Personal => "downloads, installers, device backups",
-            Self::Trash => "recoverable, but frees nothing until the trash is emptied",
+            Self::Trash => "path removals only; commands unchanged; frees nothing yet",
         }
     }
 
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn a_collapsed_section_shows_only_its_heading() {
-        // Ninety cache rules expanded by default would bury every other
+        // Dozens of cache rules expanded by default would bury every other
         // section below the fold.
         let cfg = Config::default();
         let settings = Settings::new(&cfg);

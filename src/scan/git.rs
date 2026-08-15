@@ -218,6 +218,12 @@ fn grade(survives: Survives, merge_base: &str, upstream: &str, is_gone: bool) ->
             risk: Risk::Danger,
             force: true,
         },
+        Survives::Unknown { reason } => Verdict {
+            group: "unverified branches",
+            detail: format!("could not prove this branch recoverable — {reason}"),
+            risk: Risk::Danger,
+            force: true,
+        },
     }
 }
 
@@ -237,12 +243,12 @@ enum Survives {
     OnRemote { commits: u64, remote: String },
     /// Commits that exist in this clone and nowhere else.
     LocalOnly { commits: u64 },
+    /// Git could not answer one of the questions needed for a safe verdict.
+    Unknown { reason: &'static str },
 }
 
-fn rev_count(repo: &Path, args: &[&str]) -> u64 {
-    git(repo, args)
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+fn rev_count(repo: &Path, args: &[&str]) -> Option<u64> {
+    git(repo, args).and_then(|s| s.trim().parse().ok())
 }
 
 fn survives(repo: &Path, branch: &str, merge_base: &str, is_merged: bool) -> Survives {
@@ -250,18 +256,32 @@ fn survives(repo: &Path, branch: &str, merge_base: &str, is_merged: bool) -> Sur
         return Survives::Merged;
     }
 
-    let ahead = rev_count(
+    let Some(ahead) = rev_count(
         repo,
         &["rev-list", "--count", &format!("{merge_base}..{branch}")],
-    );
+    ) else {
+        return Survives::Unknown {
+            reason: "git could not count its commits",
+        };
+    };
     if ahead == 0 {
         return Survives::Merged;
     }
 
     // `git cherry` compares patch ids, so it sees through the rewritten SHAs a
-    // squash or rebase merge produces. A `-` prefix means the patch is already
-    // upstream; a `+` means it is not.
-    if let Some(cherry) = git(repo, &["cherry", merge_base, branch]) {
+    // squash or rebase merge produces. It does not emit merge commits, however:
+    // a conflict resolution or any other content introduced by a merge would be
+    // invisible and could make a branch with unique work look safe. Only use the
+    // patch-id shortcut for a linear branch.
+    let range = format!("{merge_base}..{branch}");
+    let Some(merge_commits) = rev_count(repo, &["rev-list", "--count", "--merges", &range]) else {
+        return Survives::Unknown {
+            reason: "git could not inspect its merge history",
+        };
+    };
+    if merge_commits == 0
+        && let Some(cherry) = git(repo, &["cherry", merge_base, branch])
+    {
         let mut saw_any = false;
         let mut all_upstream = true;
         for line in cherry.lines() {
@@ -281,7 +301,12 @@ fn survives(repo: &Path, branch: &str, merge_base: &str, is_merged: bool) -> Sur
     }
 
     // Commits on this branch that no remote-tracking ref can reach.
-    let unpushed = rev_count(repo, &["rev-list", "--count", branch, "--not", "--remotes"]);
+    let Some(unpushed) = rev_count(repo, &["rev-list", "--count", branch, "--not", "--remotes"])
+    else {
+        return Survives::Unknown {
+            reason: "git could not verify its remote-tracking refs",
+        };
+    };
     if unpushed == 0 {
         let remote = git(
             repo,
@@ -355,6 +380,81 @@ fn parse_worktree_list(out: &str) -> Vec<Worktree> {
     trees
 }
 
+/// Count files Git would otherwise hide from a worktree-cleanliness check.
+fn worktree_files(path: &Path) -> Option<(usize, usize)> {
+    git(
+        path,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+    )
+    .map(|status| {
+        let mut uncommitted = 0;
+        let mut ignored = 0;
+        for line in status.lines().filter(|line| !line.trim().is_empty()) {
+            if line.starts_with("!! ") {
+                ignored += 1;
+            } else {
+                uncommitted += 1;
+            }
+        }
+        (uncommitted, ignored)
+    })
+}
+
+fn worktree_verdict(
+    branch: &str,
+    files: Option<(usize, usize)>,
+    unpushed: Option<u64>,
+) -> (Risk, String) {
+    let (risk, detail) = match (files, unpushed) {
+        (None, _) => (
+            Risk::Danger,
+            "git could not inspect files in this worktree".into(),
+        ),
+        (_, None) => (
+            Risk::Danger,
+            "git could not verify where its commits survive".into(),
+        ),
+        (Some((0, 0)), Some(0)) => (
+            Risk::Caution,
+            "clean, every commit is on a remote — safe to prune".into(),
+        ),
+        (Some((0, 0)), Some(n)) => (
+            Risk::Danger,
+            format!("clean, but {n} commits exist only here"),
+        ),
+        (Some((d, 0)), Some(0)) => (
+            Risk::Danger,
+            format!("{d} uncommitted files, commits are all pushed"),
+        ),
+        (Some((d, 0)), Some(n)) => (
+            Risk::Danger,
+            format!("{d} uncommitted files and {n} unpushed commits"),
+        ),
+        (Some((0, i)), Some(0)) => (
+            Risk::Danger,
+            format!("{i} ignored files may exist only here; commits are all pushed"),
+        ),
+        (Some((0, i)), Some(n)) => (
+            Risk::Danger,
+            format!("{i} ignored files and {n} unpushed commits"),
+        ),
+        (Some((d, i)), Some(0)) => (
+            Risk::Danger,
+            format!("{d} uncommitted and {i} ignored files; commits are all pushed"),
+        ),
+        (Some((d, i)), Some(n)) => (
+            Risk::Danger,
+            format!("{d} uncommitted files, {i} ignored files and {n} unpushed commits"),
+        ),
+    };
+    (risk, format!("[{branch}] {detail}"))
+}
+
 fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     let Some(out) = git(repo, &["worktree", "list", "--porcelain"]) else {
         return;
@@ -404,8 +504,11 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
 
         // Removing a worktree deletes its working directory outright, so both
         // uncommitted files and commits held only here are lost with it.
-        let dirty = git(&wt.path, &["status", "--porcelain"])
-            .map_or(0, |s| s.lines().filter(|l| !l.trim().is_empty()).count());
+        // Ignored files are still files. `git status --porcelain` hides them by
+        // default, while `git worktree remove --force` deletes them. Ask for
+        // matching ignored entries explicitly so an ignored database, secret or
+        // export cannot be described as an empty checkout.
+        let files = worktree_files(&wt.path);
         let unpushed = match &wt.branch {
             Some(b) => rev_count(repo, &["rev-list", "--count", b, "--not", "--remotes"]),
             // A detached HEAD is unreachable from any ref once the worktree goes.
@@ -415,24 +518,16 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
             ),
         };
 
-        let (risk, detail) = match (dirty, unpushed) {
-            (0, 0) => (
-                Risk::Caution,
-                format!("[{branch}] clean, every commit is on a remote — safe to prune"),
-            ),
-            (0, n) => (
-                Risk::Danger,
-                format!("[{branch}] clean, but {n} commits exist only here"),
-            ),
-            (d, 0) => (
-                Risk::Danger,
-                format!("[{branch}] {d} uncommitted files, commits are all pushed"),
-            ),
-            (d, n) => (
-                Risk::Danger,
-                format!("[{branch}] {d} uncommitted files and {n} unpushed commits"),
-            ),
-        };
+        let (risk, detail) = worktree_verdict(&branch, files, unpushed);
+
+        // A clean worktree should still get Git's own refusal if the scan raced
+        // with a new file. `--force` is reserved for an item already behind the
+        // irreversible confirmation.
+        let mut args = vec!["worktree".into(), "remove".into()];
+        if risk == Risk::Danger {
+            args.push("--force".into());
+        }
+        args.push(wt.path.display().to_string());
 
         let cand = Candidate::new(
             Category::Git,
@@ -443,12 +538,7 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
             risk,
             Action::Run {
                 program: "git".into(),
-                args: vec![
-                    "worktree".into(),
-                    "remove".into(),
-                    "--force".into(),
-                    wt.path.display().to_string(),
-                ],
+                args,
                 cwd: Some(repo.to_path_buf()),
             },
         )

@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use util::human;
 
-/// Find and prune the stale things eating your disk.
+/// Find and assess common stale developer and application data.
 ///
 /// These doc comments are the `--help` text, so they are written for someone
 /// reading a terminal rather than rustdoc.
@@ -46,7 +46,7 @@ struct Cli {
     #[arg(short, long = "path", value_name = "DIR")]
     paths: Vec<PathBuf>,
 
-    /// How long something must sit untouched before it counts as stale. [30]
+    /// Minimum age for candidates whose age reap can measure. [30]
     #[arg(long, value_name = "DAYS")]
     stale_days: Option<u64>,
 
@@ -101,8 +101,8 @@ struct Cli {
     #[arg(long)]
     no_personal: bool,
 
-    /// Move paths to the volume's trash instead of unlinking them. Recoverable,
-    /// but space only comes back once the trash is emptied.
+    /// Move path removals to trash. Git, Docker and cleaner commands are unchanged;
+    /// trashed space returns only once the trash is emptied.
     #[arg(long)]
     trash: bool,
 

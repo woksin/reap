@@ -41,10 +41,10 @@ mod when_an_installer_has_been_sitting_in_downloads {
     }
 
     #[test]
-    fn should_grade_it_as_costing_only_a_download() {
-        // Whatever it installs is either installed or was never wanted, so the
-        // worst case is fetching it again.
-        assert_eq!(find(&BECAUSE, "Xcode_15.dmg").risk, Risk::Caution);
+    fn should_not_assume_another_copy_can_be_downloaded() {
+        // A suffix cannot distinguish a public installer from a custom disk
+        // image or a locally built package that exists only here.
+        assert_eq!(find(&BECAUSE, "Xcode_15.dmg").risk, Risk::Danger);
     }
 
     #[test]
@@ -52,7 +52,9 @@ mod when_an_installer_has_been_sitting_in_downloads {
         // The detail line is the only place a non-developer is told what reap
         // thinks this is, and therefore whether reap has it right.
         assert!(
-            find(&BECAUSE, "Xcode_15.dmg").detail.contains("installer"),
+            find(&BECAUSE, "Xcode_15.dmg")
+                .detail
+                .contains("cannot prove"),
             "{}",
             find(&BECAUSE, "Xcode_15.dmg").detail
         );

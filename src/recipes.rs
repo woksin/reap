@@ -168,13 +168,6 @@ pub fn builtin() -> Vec<RecipeRule> {
                 "caches/system",
             ],
         ),
-        r(
-            'i',
-            "Installers you have already run",
-            "disk images and setup files · the apps they installed stay installed",
-            RiskName::Rebuildable,
-            &["personal/installers"],
-        ),
     ]
 }
 

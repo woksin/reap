@@ -5,7 +5,7 @@ edition = "2024"
 # Let-chains, which this crate uses throughout, are stable from here. The README
 # advertises the same floor; this is what actually holds it.
 rust-version = "1.88"
-description = "Interactive TUI for finding and pruning stale developer junk"
+description = "Interactive TUI for assessing common stale developer and application data"
 license = "MIT"
 repository = "https://github.com/woksin/reap"
 readme = "README.md"
