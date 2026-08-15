@@ -58,6 +58,12 @@ mod when_a_worktree_is_clean_and_fully_pushed {
             "action: {action}"
         );
     }
+
+    #[test]
+    fn should_leave_gits_own_cleanliness_check_in_force() {
+        let action = the_worktree(&BECAUSE, "spare-checkout").action.describe();
+        assert!(!action.contains("--force"), "action: {action}");
+    }
 }
 
 mod when_a_worktree_holds_commits_no_remote_has {
@@ -109,6 +115,35 @@ mod when_a_worktree_has_uncommitted_changes {
                 .contains("1 uncommitted file"),
             "detail was: {}",
             the_worktree(&BECAUSE, "dirty-checkout").detail
+        );
+    }
+}
+
+mod when_a_worktree_has_an_ignored_file {
+    use super::*;
+
+    static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
+        a_repository::new()
+            .with_a_worktree_holding_an_ignored_file("ignored-checkout")
+            .candidates()
+    });
+
+    #[test]
+    fn should_consider_the_ignored_file_irreversible() {
+        assert_eq!(
+            the_worktree(&BECAUSE, "ignored-checkout").risk,
+            Risk::Danger
+        );
+    }
+
+    #[test]
+    fn should_say_what_git_normally_hides() {
+        assert!(
+            the_worktree(&BECAUSE, "ignored-checkout")
+                .detail
+                .contains("ignored"),
+            "detail was: {}",
+            the_worktree(&BECAUSE, "ignored-checkout").detail
         );
     }
 }

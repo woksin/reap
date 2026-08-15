@@ -113,7 +113,7 @@ pub struct ScanOpts {
     pub cache: std::sync::Arc<crate::cache::SizeCache>,
     /// Directories to search for repositories and build artifacts.
     pub roots: Vec<PathBuf>,
-    /// A branch, worktree or artifact must be untouched this long to count as stale.
+    /// A candidate with a measurable age must be untouched this long to count as stale.
     pub stale_days: u64,
     /// Ignore anything smaller than this, to keep the list signal-dense.
     pub min_size: u64,
@@ -247,7 +247,7 @@ pub fn spawn_all(opts: ScanOpts, tx: Sender<ScanEvent>) {
 pub fn discover_repos(opts: &ScanOpts) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for root in &opts.roots {
-        walk_for_git(root, 0, opts.max_depth.min(5), &opts.rules, &mut found);
+        walk_for_git(root, 0, opts.max_depth, &opts.rules, &mut found);
     }
     found.sort();
     found.dedup();
@@ -298,11 +298,20 @@ fn walk_for_git(dir: &Path, depth: usize, max_depth: usize, rules: &Rules, out: 
     if depth > max_depth {
         return;
     }
-    if dir.join(".git").exists() {
+    let checkout = dir.join(".git").exists();
+    let bare =
+        dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir();
+    if checkout || bare {
         out.push(dir.to_path_buf());
-        // Nested repos are rare and submodules are managed by the parent, so a
-        // repository terminates the walk.
-        return;
+        if bare {
+            // A bare repository has no worktree to contain a nested checkout.
+            // Descending here would instead walk every loose object.
+            return;
+        }
+        // Keep walking. Submodules, nested clones and agent worktrees are still
+        // repositories with independent local work, and stopping at their parent
+        // makes them invisible. The expensive generated trees remain excluded by
+        // `never_descend` below.
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -315,7 +324,7 @@ fn walk_for_git(dir: &Path, depth: usize, max_depth: usize, rules: &Rules, out: 
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') || rules.is_never_descend(&name) {
+        if rules.is_never_descend(&name) {
             continue;
         }
         walk_for_git(&entry.path(), depth + 1, max_depth, rules, out);
@@ -339,6 +348,12 @@ const BUILTIN_NEVER_DESCEND: &[&str] = &[
     "Windows",
     "Program Files",
     "Program Files (x86)",
+    // Repository administration, never another checkout. These are explicit
+    // rather than a blanket dot-directory rule because `.worktrees` and similar
+    // hidden directories commonly contain real agent checkouts.
+    ".git",
+    ".hg",
+    ".svn",
 ];
 
 /// Send a candidate unless the user's ignore rules exclude it.
@@ -346,6 +361,12 @@ const BUILTIN_NEVER_DESCEND: &[&str] = &[
 /// Every scanner goes through here, so a pattern cannot be honoured in one
 /// category and quietly missed in another.
 pub fn emit(tx: &Sender<ScanEvent>, opts: &ScanOpts, mut cand: crate::model::Candidate) {
+    // One age policy for every scanner. Keeping this at the common exit means a
+    // new category cannot accidentally display recent entries while the CLI says
+    // `--stale-days` applies to anything whose age reap can measure.
+    if cand.age_days.is_some_and(|age| age < opts.stale_days) {
+        return;
+    }
     if opts.rules.ignore.matches_candidate(&cand) {
         return;
     }
@@ -421,6 +442,36 @@ mod tests {
     }
 
     #[test]
+    fn repository_discovery_includes_hidden_nested_and_bare_repositories() {
+        let root = std::env::temp_dir().join(format!("reap-repo-discovery-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let hidden = root.join("project/.worktrees/agent");
+        // Deeper than the old hard-coded ceiling of five, but inside the
+        // configured limit used below.
+        let nested = root.join("project/components/one/two/three/four/source");
+        let bare = root.join("archives/project.git");
+        std::fs::create_dir_all(hidden.join(".git")).unwrap();
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+        std::fs::create_dir_all(bare.join("objects")).unwrap();
+        std::fs::create_dir_all(bare.join("refs")).unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let mut found = Vec::new();
+        walk_for_git(&root, 0, 8, &Rules::default(), &mut found);
+
+        assert!(
+            found.contains(&hidden),
+            "hidden worktree missing: {found:?}"
+        );
+        assert!(
+            found.contains(&nested),
+            "nested repository missing: {found:?}"
+        );
+        assert!(found.contains(&bare), "bare repository missing: {found:?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn emit_drops_candidates_the_config_ignores() {
         use crate::model::{Action, Candidate, Category, Risk};
         use std::sync::mpsc::channel;
@@ -456,6 +507,44 @@ mod tests {
             })
             .collect();
         assert_eq!(got, ["/work/project/keep-me"]);
+    }
+
+    #[test]
+    fn emit_drops_recent_candidates_but_keeps_old_and_ageless_ones() {
+        use crate::model::{Action, Candidate, Category, Risk};
+        use std::sync::mpsc::channel;
+
+        let opts = ScanOpts {
+            stale_days: 30,
+            ..Default::default()
+        };
+        let make = |label: &str, age| {
+            Candidate::new(
+                Category::Artifacts,
+                "test",
+                label,
+                "",
+                1,
+                Risk::Safe,
+                Action::Remove(PathBuf::from(format!("/work/project/{label}"))),
+            )
+            .with_age(age)
+        };
+
+        let (tx, rx) = channel();
+        emit(&tx, &opts, make("recent", Some(2)));
+        emit(&tx, &opts, make("old", Some(31)));
+        emit(&tx, &opts, make("ageless", None));
+        drop(tx);
+
+        let got: Vec<String> = rx
+            .iter()
+            .filter_map(|event| match event {
+                ScanEvent::Found(candidate) => Some(candidate.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, ["old", "ageless"]);
     }
 
     #[test]

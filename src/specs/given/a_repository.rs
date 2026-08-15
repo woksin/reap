@@ -68,6 +68,36 @@ impl a_repository {
         self
     }
 
+    /// Both ordinary patches are upstream, but a merge commit itself introduced
+    /// content that exists only on the branch. `git cherry` omits that merge.
+    pub fn with_a_branch_holding_unique_merge_content(self, name: &str) -> Self {
+        git(&self.work, &["checkout", "-q", "-b", name]);
+        self.commit("feature.txt", "feature patch");
+        let feature = git(&self.work, &["rev-parse", "HEAD"]);
+
+        git(
+            &self.work,
+            &["checkout", "-q", "-b", "fixture-side", "main"],
+        );
+        self.commit("side.txt", "side patch");
+        let side = git(&self.work, &["rev-parse", "HEAD"]);
+
+        git(&self.work, &["checkout", "-q", name]);
+        git(
+            &self.work,
+            &["merge", "--no-ff", "-m", "merge side", "fixture-side"],
+        );
+        std::fs::write(self.work.join("merge-only.txt"), "unique resolution\n").unwrap();
+        git(&self.work, &["add", "merge-only.txt"]);
+        git(&self.work, &["commit", "--amend", "--no-edit"]);
+
+        git(&self.work, &["checkout", "-q", "main"]);
+        git(&self.work, &["cherry-pick", &feature]);
+        git(&self.work, &["cherry-pick", &side]);
+        git(&self.work, &["push", "origin", "main"]);
+        self
+    }
+
     /// Unmerged, but every commit is on the remote and can be fetched back.
     pub fn with_a_branch_pushed_but_unmerged(self, name: &str) -> Self {
         self.branch_with_a_commit(name);
@@ -123,6 +153,23 @@ impl a_repository {
         git(&self.work, &["add", "stashed.txt"]);
         git(&self.work, &["stash", "push", "-m", message]);
         self
+    }
+
+    /// A worktree that looks clean unless Git is explicitly asked for ignored
+    /// files. Forced removal would delete the file along with the checkout.
+    pub fn with_a_worktree_holding_an_ignored_file(self, name: &str) -> Self {
+        std::fs::write(self.work.join(".gitignore"), "ignored-only.bin\n").unwrap();
+        git(&self.work, &["add", ".gitignore"]);
+        git(&self.work, &["commit", "-m", "ignore generated files"]);
+        git(&self.work, &["push", "origin", "main"]);
+
+        let this = self.with_a_worktree(name);
+        std::fs::write(
+            this.dir.path.join(name).join("ignored-only.bin"),
+            "the only copy\n",
+        )
+        .unwrap();
+        this
     }
 
     /// Everything the git scanner reports for this repository.

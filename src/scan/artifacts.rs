@@ -31,6 +31,7 @@ const BUILTIN: &[BuiltinArtifact] = &[
         "cargo build",
         RiskName::Rebuildable,
     ),
+    ("target", &["pom.xml"], "mvn package", RiskName::Rebuildable),
     (
         "bin",
         &["*.csproj", "*.fsproj", "*.vbproj", "*.sln"],
@@ -159,6 +160,12 @@ const BUILTIN: &[BuiltinArtifact] = &[
         "stack build",
         RiskName::Rebuildable,
     ),
+    (
+        ".build",
+        &["Package.swift"],
+        "swift build",
+        RiskName::Rebuildable,
+    ),
     ("zig-cache", &["build.zig"], "zig build", RiskName::Safe),
     (
         "zig-out",
@@ -182,18 +189,23 @@ pub fn builtin_rules() -> Vec<ArtifactRule> {
 
 /// Index of the rule matching `name`, if its evidence is present.
 fn match_rule(rules: &[ArtifactRule], name: &str, siblings: &HashSet<String>) -> Option<usize> {
-    let idx = rules.iter().position(|r| r.dir == name)?;
-    let rule = &rules[idx];
-    if rule.evidence.is_empty() {
-        return Some(idx);
-    }
-    let ok = rule.evidence.iter().any(|ev| match ev.strip_prefix("*.") {
-        Some(ext) => siblings
+    rules.iter().enumerate().find_map(|(idx, rule)| {
+        if rule.dir != name {
+            return None;
+        }
+        if rule.evidence.is_empty() {
+            return Some(idx);
+        }
+        rule.evidence
             .iter()
-            .any(|f| f.rsplit_once('.').is_some_and(|(_, e)| e == ext)),
-        None => siblings.contains(ev.as_str()),
-    });
-    ok.then_some(idx)
+            .any(|ev| match ev.strip_prefix("*.") {
+                Some(ext) => siblings
+                    .iter()
+                    .any(|f| f.rsplit_once('.').is_some_and(|(_, e)| e == ext)),
+                None => siblings.contains(ev.as_str()),
+            })
+            .then_some(idx)
+    })
 }
 
 struct Hit {
@@ -301,7 +313,7 @@ fn collect(
             }
             continue;
         }
-        if name.starts_with('.') || opts.rules.is_never_descend(&name) {
+        if opts.rules.is_never_descend(&name) {
             continue;
         }
         collect(&path, depth + 1, max_depth, rules, opts, out);

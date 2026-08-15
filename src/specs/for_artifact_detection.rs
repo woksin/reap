@@ -99,6 +99,58 @@ mod when_evidence_is_matched_by_extension {
     }
 }
 
+mod when_two_ecosystems_use_the_same_output_directory_name {
+    use super::*;
+
+    #[test]
+    fn should_recognise_mavens_target_by_its_own_manifest() {
+        let found = a_project::new()
+            .with_a_file("pom.xml")
+            .with_a_directory("target")
+            .candidates();
+        let target = found
+            .iter()
+            .find(|candidate| candidate.label.ends_with("/target"))
+            .expect("Maven target should be offered");
+        assert!(target.detail.contains("mvn package"), "{}", target.detail);
+    }
+
+    #[test]
+    fn should_allow_a_later_custom_rule_with_a_reused_name_to_match() {
+        let mut cfg = Config::default();
+        cfg.artifacts.push(ArtifactRule {
+            dir: "target".into(),
+            evidence: vec!["custom.build".into()],
+            regen: "custom rebuild".into(),
+            risk: RiskName::Safe,
+        });
+        let found = a_project::new()
+            .with_a_file("custom.build")
+            .with_a_directory("target")
+            .candidates_with(&cfg);
+
+        assert_eq!(found.len(), 1);
+        assert!(found[0].detail.contains("custom rebuild"));
+    }
+}
+
+mod when_swift_puts_build_output_in_a_hidden_directory {
+    use super::*;
+
+    #[test]
+    fn should_recognise_the_package_managers_build_directory() {
+        let found = a_project::new()
+            .with_a_file("Package.swift")
+            .with_a_directory(".build")
+            .candidates();
+        let output = found
+            .iter()
+            .find(|candidate| candidate.label.ends_with("/.build"))
+            .expect("Swift .build should be offered");
+        assert!(output.detail.contains("swift build"), "{}", output.detail);
+    }
+}
+
 mod when_a_directory_needs_no_evidence_at_all {
     use super::*;
 

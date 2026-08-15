@@ -117,6 +117,32 @@ mod when_a_branch_was_squash_merged {
     }
 }
 
+mod when_a_branchs_merge_commit_holds_unique_content {
+    use super::*;
+
+    static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
+        a_repository::new()
+            .with_a_branch_holding_unique_merge_content("feature/merge-resolution")
+            .candidates()
+    });
+
+    #[test]
+    fn should_not_call_it_squash_merged_just_because_its_non_merge_patches_are_upstream() {
+        assert_ne!(
+            the_branch(&BECAUSE, "feature/merge-resolution").group,
+            "squash-merged branches"
+        );
+    }
+
+    #[test]
+    fn should_keep_the_unique_merge_content_behind_the_irreversible_gate() {
+        assert_eq!(
+            the_branch(&BECAUSE, "feature/merge-resolution").risk,
+            Risk::Danger
+        );
+    }
+}
+
 mod when_a_branch_is_unmerged_but_pushed {
     use super::*;
 
