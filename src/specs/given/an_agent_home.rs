@@ -213,12 +213,29 @@ impl an_agent_home {
 const TRANSCRIPT: &str = "transcript.jsonl";
 
 /// A path written the way the agents write it: separators replaced by dashes.
+///
+/// Only the named components. Skipping the first one instead reads as "drop the
+/// leading separator" and is that on unix — but a Windows path begins with a
+/// drive *and* a root, so it left the root behind as a literal `\` in the middle
+/// of the name. Joining that produced a directory separator rather than a
+/// character in a directory's name, which quietly nested every fixture store
+/// inside one shared parent instead of making them siblings, and the scanner
+/// then judged them as a single store.
 fn flatten(path: &Path) -> String {
     let mut flat = String::new();
-    for part in path.components().skip(1) {
-        flat.push('-');
-        flat.push_str(&part.as_os_str().to_string_lossy());
+    for part in path.components() {
+        if let std::path::Component::Normal(name) = part {
+            flat.push('-');
+            flat.push_str(&name.to_string_lossy());
+        }
     }
+    // The whole point of a flattened name is that it is one directory's name.
+    // A separator surviving in it changes the shape of the fixture rather than
+    // failing it, and a scanner then answers a question nobody asked.
+    assert!(
+        !flat.contains(['/', '\\']),
+        "a flattened project name must not hold a separator: {flat}"
+    );
     flat
 }
 
