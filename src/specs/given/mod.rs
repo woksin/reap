@@ -10,9 +10,11 @@ pub mod a_docker_daemon;
 pub mod a_download_directory;
 pub mod a_project;
 pub mod a_repository;
+pub mod an_agent_home;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 /// A scratch directory that removes itself when the context ends.
 pub struct scratch {
@@ -86,8 +88,67 @@ pub fn scanning_everything(roots: Vec<PathBuf>) -> crate::scan::ScanOpts {
         max_depth: 8,
         skip_docker: true,
         skip_caches: true,
+        skip_agents: true,
         skip_personal: true,
         // Only the fixture's own tree, never the machine running the specs.
         scan_home_strays: false,
     }
+}
+
+/// Move a path's modification time `seconds_ago` into the past.
+///
+/// The scanners' staleness rules read mtime, so a fixture that wrote everything
+/// "now" could only ever specify the recent case. Seconds rather than days
+/// because one threshold in play is a threshold in hours: a session that ended
+/// this morning is not a session that is finished.
+///
+/// Zero is a real instruction to stamp the path with the current time, not a
+/// request to leave it alone — a fixture asks for that *after* aging the tree
+/// around it, and "leave it alone" would silently hand back the old timestamp.
+fn back_date(path: &Path, seconds_ago: u64) {
+    let when = SystemTime::now() - Duration::from_secs(seconds_ago);
+    let file = open_to_set_times(path).expect("the fixture's own path");
+    file.set_modified(when).expect("back-dating the fixture");
+}
+
+/// Back-date everything under `dir`, and `dir` itself, deepest first.
+///
+/// The order is the point. Writing a file updates the directory holding it, so
+/// aging a parent before its children undoes itself on the way back down.
+fn back_date_tree(dir: &Path, seconds_ago: u64) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => back_date_tree(&path, seconds_ago),
+                Ok(ft) if ft.is_file() => back_date(&path, seconds_ago),
+                _ => {}
+            }
+        }
+    }
+    back_date(dir, seconds_ago);
+}
+
+/// Open a file *or a directory* in a way that permits setting its timestamps.
+///
+/// The two platforms disagree about what that takes, and both refuse the
+/// other's answer. `futimens` works through a read-only descriptor, and a
+/// directory cannot be opened any other way on unix. Windows wants the
+/// attribute-write right named explicitly, and will not open a directory at all
+/// without backup semantics.
+#[cfg(unix)]
+fn open_to_set_times(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+#[cfg(windows)]
+fn open_to_set_times(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
 }

@@ -7,12 +7,26 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 /// Where unnamed application caches live, per platform.
-fn unnamed_cache_root(home: &std::path::Path) -> PathBuf {
+///
+/// More than one place on macOS, which used to be written here as a choice
+/// between them. The platform has a cache directory and says so, but a great
+/// deal of developer tooling is cross-platform first and writes to `~/.cache`
+/// wherever it runs — node, gh, the scanners, anything built to XDG. Treating
+/// that as a Linux-only path left gigabytes on a Mac that no sweep ever looked
+/// at, while rules naming `~/.cache/...` were quietly finding things there all
+/// along.
+fn unnamed_cache_roots(home: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
     if cfg!(target_os = "macos") {
-        home.join("Library/Caches")
-    } else {
-        std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home.join(".cache"), PathBuf::from)
+        roots.push(home.join("Library/Caches"));
     }
+    roots.push(
+        std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home.join(".cache"), PathBuf::from),
+    );
+    roots.retain(|r| r.is_dir());
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 /// Where applications keep their own data, per platform.
@@ -262,16 +276,42 @@ fn collect_app_caches(
 /// How far into the cache root the unnamed sweep will step around a rule.
 const UNNAMED_MAX_DEPTH: usize = 3;
 
+/// How far below a cache entry to look for a checkout before offering it.
+///
+/// One level finds a directory that is itself a clone; two finds the common
+/// arrangement where a tool keeps a directory of them, one per branch or per
+/// task. Deeper than that costs more than it is worth on a cache root holding
+/// hundreds of entries.
+const REPO_PROBE_DEPTH: usize = 2;
+
+/// Whether `dir`, or something just inside it, is a git checkout.
+fn holds_a_checkout(dir: &std::path::Path, depth: usize) -> bool {
+    if dir.join(".git").exists() {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten()
+        // `is_dir` is false for symlinks, which keeps cycles out of the probe.
+        .filter(|e| e.file_type().is_ok_and(|f| f.is_dir()))
+        .any(|e| holds_a_checkout(&e.path(), depth - 1))
+}
+
 /// Anything large under the platform's application-cache root that no rule
 /// already names — `~/Library/Caches` on macOS, `~/.cache` elsewhere.
 fn library_caches(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
-    let root = unnamed_cache_root(home);
     // Anything a rule already covers is reported by that rule, with its own
     // wording and its own risk.
     let named: Vec<PathBuf> = opts.rules.caches.iter().map(|r| expand(&r.path)).collect();
 
     let mut entries = Vec::new();
-    collect_unnamed(&root, &named, 0, &mut entries);
+    for root in unnamed_cache_roots(home) {
+        collect_unnamed(&root, &named, 0, &mut entries);
+    }
 
     // These are noisy, so only surface the ones actually worth a keystroke.
     let floor = opts.min_size.max(opts.rules.library_cache_floor);
@@ -323,6 +363,16 @@ fn collect_unnamed(dir: &std::path::Path, named: &[PathBuf], depth: usize, out: 
         }
         let path = entry.path();
         if named.contains(&path) {
+            continue;
+        }
+        // A checkout is not a cache, whatever directory it was put in. Tools
+        // that build in a scratch directory leave worktrees under one of these
+        // roots, and this sweep's whole claim is that the owning application
+        // will rebuild what it takes — which is exactly wrong about a
+        // repository, and wrong in the direction that loses commits. reap has a
+        // category that can prove things about a checkout; this is not it, so
+        // it declines rather than guesses.
+        if holds_a_checkout(&path, REPO_PROBE_DEPTH) {
             continue;
         }
         // Something named lives further in. Step past it so its siblings are
@@ -384,6 +434,77 @@ mod tests {
             "the named entry must be left to its rule, and its siblings kept"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_unnamed_sweep_refuses_a_checkout_however_it_got_there() {
+        // The bug this exists to prevent, and it was a real one: a tool that
+        // builds in a scratch directory leaves git worktrees under a cache
+        // root, and this sweep offers what it does not recognise as "rebuilt by
+        // the owning app" at the rebuildable tier. Nothing rebuilds a commit
+        // that was never pushed, and the rebuildable tier is taken by a recipe
+        // without a typed confirmation.
+        let root = tree(
+            "checkouts",
+            &[
+                // A clone sitting directly in the cache root.
+                "some-clone/.git",
+                // The commoner shape: a directory of worktrees, one per task.
+                "worktrees/task-one/.git",
+                "worktrees/task-two/.git",
+                // And something that really is a cache, to prove the guard is
+                // not simply refusing everything.
+                "http-cache/entries",
+            ],
+        );
+
+        let mut found = Vec::new();
+        collect_unnamed(&root, &[], 0, &mut found);
+        found.sort();
+
+        assert_eq!(
+            found,
+            vec![root.join("http-cache")],
+            "a checkout must never be offered as a cache"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_checkout_is_recognised_at_the_surface_and_one_level_down() {
+        let root = tree(
+            "probe",
+            &["itself/.git", "holder/inside/.git", "plain/a/b/c"],
+        );
+
+        assert!(holds_a_checkout(&root.join("itself"), REPO_PROBE_DEPTH));
+        assert!(holds_a_checkout(&root.join("holder"), REPO_PROBE_DEPTH));
+        assert!(!holds_a_checkout(&root.join("plain"), REPO_PROBE_DEPTH));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_cache_roots_include_the_cross_platform_one_everywhere() {
+        // `~/.cache` was treated as the Linux answer and `~/Library/Caches` as
+        // the macOS one, as though a machine had only whichever its vendor
+        // chose. Tooling written to be cross-platform writes to `~/.cache` on a
+        // Mac too, and none of it was ever swept.
+        let home = tree("roots", &["Library/Caches", ".cache"]);
+        // Set nothing: this reads XDG_CACHE_HOME from the environment, and the
+        // specs must not depend on how the machine running them is configured.
+        let roots = unnamed_cache_roots(&home);
+
+        assert!(
+            roots.contains(&home.join(".cache")) || std::env::var_os("XDG_CACHE_HOME").is_some(),
+            "~/.cache must be swept on every platform: {roots:?}"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(
+                roots.contains(&home.join("Library/Caches")),
+                "the platform's own cache root must still be swept: {roots:?}"
+            );
+        }
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

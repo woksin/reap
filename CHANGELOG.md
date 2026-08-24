@@ -12,8 +12,105 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A checkout is no longer offered as a cache.** The unnamed cache sweep
+  reported anything large it did not recognise as "rebuilt by the owning app",
+  at the rebuildable tier — which a quick recipe takes without a typed
+  confirmation. Tools that build in a scratch directory leave git worktrees
+  under a cache root, and nothing rebuilds a commit that was never pushed. The
+  sweep now declines a directory that is, or just contains, a checkout and
+  leaves it to the Git category, which can prove whether the work in it is
+  pushed. This shipped on Linux, where `~/.cache` was already the swept root.
+- **`~/.cache` is swept on macOS too.** It was treated as the Linux answer and
+  `~/Library/Caches` as the macOS one, as though a machine had only whichever
+  its vendor chose. A great deal of developer tooling is cross-platform first
+  and writes to `~/.cache` wherever it runs — and rules naming `~/.cache/...`
+  were quietly matching there all along, while the sweep that catches
+  everything else never looked. Worth about 1.5 GB on the machine this was
+  found on.
+
 ### Added
 
+- **A `Coding agents` category.** The tools that write the debris this project
+  was built for were the one thing on the machine reap could not see: their
+  data lives in dot-directories directly under `$HOME` — `~/.claude`,
+  `~/.codex`, `~/.pi`, `~/.copilot`, `~/.cursor`, `~/.gemini`,
+  `~/.local/share/opencode` — which is neither the platform cache root, nor an
+  application-support directory, nor anywhere the repository walk goes.
+
+  The split that matters is inside those directories rather than between them.
+  Caches, logs and finished background-job output are graded safe; package and
+  plugin trees cost a re-download; **session transcripts are graded
+  irreversible**, on the same reasoning `Personal` uses — nothing regenerates a
+  conversation, and the machine holds no second copy of one.
+
+  Every rule therefore names the narrowest directory that holds one kind of
+  thing, which is rarely the one with the tool's name on it: `plugins/cache`
+  and not `plugins/`, whose `installed_plugins.json` is the record of what you
+  had installed; `npm/node_modules` and not `npm/`, whose `package.json` is the
+  list of your extensions and the thing that puts them back.
+
+  Nothing is offered until it is provably finished, and finished is measured
+  from **the newest file anywhere inside a store** rather than from the store's
+  own timestamp. A directory's mtime moves when an entry is added and not when
+  one is written to, and a transcript is appended to for as long as a session
+  lasts — so a conversation running right now, or an old one resumed this
+  morning, leaves every directory above it stamped with the day it was created,
+  and reading that would offer a live session as months idle. A store written
+  to within the last 24 hours is not offered at all: the one threshold here
+  that `--stale-days 0` cannot lower, since a gap of hours is a claim about when
+  reap happened to run rather than about whether the work is done. The same rule
+  covers the safe tier, so a running background job protects its own log.
+
+  History is offered **one project or one month at a time** rather than as a
+  single all-or-nothing lump. Where a tool names its store after the project's
+  path with the separators flattened (`-Volumes-sourcecode-reap`), reap
+  resolves that back to a real directory against the filesystem — a dash is
+  legal in a directory name, so the mapping is ambiguous and is searched rather
+  than assumed — which surfaces the case actually worth acting on: **sessions
+  for a project that is no longer on the machine**.
+
+  That row states the observation and not a conclusion. reap saw that nothing of
+  that name is there; it did not see a deletion, and from here an unmounted
+  volume is indistinguishable from a removed directory — so the row offers both
+  readings and leaves the conclusion to the reader. A name that is not a path at
+  all, or a search that had to be abandoned, says only that reap cannot place
+  it. A layout reap does not recognise is offered whole and says so, rather than
+  being silently skipped.
+
+  `A` in the quick-reap palette takes the caches and package trees and never a
+  transcript. `--no-agents`, or `agents = false` under `[scan]`, turns the whole
+  category off. `[[agent]]` entries in the configuration add tools reap does not
+  ship knowing about, with `replace_builtin_agents` to use only your own; `risk`
+  defaults to irreversible there rather than to rebuildable, since a directory
+  under an agent's own tree is history until someone says otherwise. Aider's
+  per-project `.aider.tags.cache.v3` is recognised as a build artifact, since
+  its name alone is proof of what it is.
+- **Caches no rule reached.** Yarn Berry keeps its store at `~/.yarn/berry`
+  rather than in either of the two places Yarn Classic used, so neither rule
+  covered it; `~/.npm/_npx` is a second npm cache beside `_cacache`; Pulumi's
+  downloaded providers and logs; rustup's part-downloads and scratch files.
+  pi-lens joins the coding-agent category with its logs, project indexes,
+  downloaded language servers and tool packages.
+
+  Also the runtimes the version managers download — rustup toolchains, nvm's
+  node versions — which come back from the manifest in each project that pins
+  them, and VS Code's cached extension archives.
+- **`~/.vscode/extensions`, graded like a personal file.** Routinely the largest
+  directory on a developer machine that no other rule reaches: 6.29 GB on the
+  one this was surveyed on. Every other cache is safe to offer because the
+  record of what to put back is a project file reap never touches — a
+  `Cargo.toml`, a `package.json`. This one's record is `extensions.json` and it
+  lives *inside* the directory, so there is no narrower thing to name and
+  nothing left behind to reinstall from unless Settings Sync had it, which reap
+  cannot see and does not claim to.
+
+  Shown anyway, because hiding the biggest thing on the disk is how disks stay
+  full, and graded **irreversible** so no recipe and no unattended `--reap`
+  below the irreversible ceiling can take it. Someone who syncs can say so with
+  an `[[override]]`. A rule whose own detail line admits it holds the only
+  record of something is now held to that grading by a test.
 - **Windows support.** Built and tested in CI alongside macOS and Linux, and
   published as the executable itself — `reap-windows-x86_64.exe` and
   `reap-windows-x86.exe` — since a fresh Windows has nothing that unpacks a

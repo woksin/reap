@@ -158,6 +158,7 @@ reap -p ~/work -p ~/oss   # scan specific directories
 reap --stale-days 90      # require 90 days where an age can be measured
 reap --min-size 100MB     # hide the small fry
 reap --no-docker          # skip the Docker scan
+reap --no-agents          # skip agent caches, packages and session history
 reap --no-personal        # skip downloads, installers and device backups
 reap --no-cache           # re-measure everything instead of reusing sizes
 reap --ignore '*/vendor'  # skip anything matching, without editing the config
@@ -212,6 +213,7 @@ After the first couple of runs, the ticking is the same ticking. `R` opens the r
 │   d  Docker · safe                               41    21.2 GB         │
 │   D  Docker · everything but the volumes         66    25.5 GB         │
 │   c  Caches                                       8    16.8 GB         │
+│   A  Coding agents · caches and packages         11    1.31 GB         │
 │   a  Apps · what they will simply rebuild        34    9.28 GB         │
 │                                                                        │
 │   merged and squash-merged · already in the integration branch         │
@@ -261,7 +263,7 @@ Filmed against [a throwaway fixture](assets/fixture.sh) — invented branches, b
 repositories with real remotes, and every verdict reached the way it would be on yours.</sub>
 
 | Group | Verdict | Risk |
-|---|---|---|
+| --- | --- | --- |
 | `merged branches` | reachable from the integration branch | 🟢 safe |
 | `squash-merged branches` | linear history; every non-merge patch is already upstream | 🟢 safe |
 | `pushed branches` | unmerged, but every commit is on a remote | 🟡 rebuildable |
@@ -320,8 +322,11 @@ changes its output.
 
 <br>
 
-**Developer tools** — npm, pnpm, yarn, bun, NuGet, Maven, Gradle, cargo, Go, pip, uv,
-Homebrew, Xcode DerivedData and device support, Playwright and Puppeteer browsers.
+**Developer tools** — npm and npx, pnpm, yarn (Classic *and* Berry, which keeps its store
+somewhere neither Classic path reaches), bun, NuGet, Maven, Gradle, cargo, Go, pip, uv,
+Homebrew, Pulumi providers, Xcode DerivedData and device support, Playwright and Puppeteer
+browsers, and the runtimes the version managers download — rustup toolchains, nvm's node
+versions — which come back from the manifest in each project that pins them.
 
 **Common application caches** — Chrome, Firefox, Safari, Edge and Brave caches
 (never a profile: you stay signed in); Adobe's media cache, waveform and Camera Raw
@@ -335,13 +340,122 @@ into the app's own data directory, where no platform's cache sweep ever looks. r
 `~/Library/Application Support`, `~/.config`, `%APPDATA%` and `%LOCALAPPDATA%` for those
 names exactly, and reports them grouped by the app that owns them.
 
-Plus anything over 200 MB in the platform's cache root that no rule already names — and
-if a rule names something *inside* one of those directories, reap steps around it rather
-than over it, so the same gigabytes are never offered twice under two different labels.
+Plus anything over 200 MB in a cache root that no rule already names — `~/Library/Caches`
+and `~/.cache` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere. If a rule names
+something *inside* one of those directories, reap steps around it rather than over it, so
+the same gigabytes are never offered twice under two different labels.
+
+**A checkout is never offered as a cache**, however it got there. Tools that build in a
+scratch directory leave git worktrees under a cache root, and this sweep's claim is that
+the owning application rebuilds what it takes — which is exactly wrong about a
+repository, and wrong in the direction that loses commits. Those are left to the Git
+category, which can prove whether the work in them is pushed:
+
+```
+▲ Screenplay.Generation: ~/.cache/pi-worktrees/Generation-bare-specification-rejection
+  [fix/bare-specification-rejection] 22 ignored files may exist only here; commits are all pushed
+```
 
 The pnpm store is hard-linked into every `node_modules` on the machine, so it is handed to
 `pnpm store prune` rather than deleted out from under them. The Recycle Bin is emptied
 through the shell rather than unlinked, because it is indexed.
+
+**One entry here is graded like a personal file.** `~/.vscode/extensions` is routinely the
+largest directory on a developer machine that nothing else on this list reaches — 6.29 GB
+on the one this was written on. Every other cache above is safe to offer because the
+record of what to put back is a project file reap never touches: a `Cargo.toml`, a
+`package.json`, a `pom.xml`. This one's record is `extensions.json`, and it lives *inside*
+the directory. Take it and the extensions come back only if you can name all eighty, or if
+Settings Sync had them — and reap cannot see whether it did, so it does not claim to.
+
+The row is shown, because hiding the biggest thing on the disk is how disks stay full, and
+it is graded **irreversible** so nothing takes it without asking. If you sync, say so
+once:
+
+```toml
+[[override]]
+match = ["~/.vscode/extensions"]
+risk = "rebuildable"
+```
+
+</details>
+
+<details>
+<summary><b>Coding agents</b> — the debris of the thing this was built for</summary>
+
+<br>
+
+Claude Code, Codex, pi, Copilot CLI, Cursor CLI, Gemini CLI and opencode keep their data
+in dot-directories directly under `$HOME` — `~/.claude`, `~/.codex`, `~/.pi` — which is
+neither the platform cache root, nor an application-support directory, nor anywhere the
+repository walk goes. Nothing else on this list looks there, and on a machine that runs
+agents it is routinely the largest thing that is not `node_modules`.
+
+The split that matters is *inside* those directories. Caches, logs and the output of
+background jobs that have already finished are **safe**. Plugin and package trees cost a
+**re-download**. Session transcripts are neither: nothing regenerates a conversation, so
+they are graded **irreversible** on exactly the reasoning Personal uses below.
+
+So every rule names the **narrowest directory that holds one kind of thing**, which is
+rarely the one with the tool's name on it. `~/.claude/plugins` looks like a cache and is
+not — `installed_plugins.json` and `known_marketplaces.json` sit beside the downloaded
+content, and taking the directory wholesale would lose the record of what you had
+installed while reporting that it had freed a cache. The rule names `plugins/cache`.
+Likewise `~/.pi/agent/npm/node_modules` and not `npm/`, because the `package.json` beside
+it is the list of your extensions and the thing that puts them back.
+
+History is offered one project — or one month — at a time, never as a single
+all-or-nothing lump, because "do I still want my history" has no answer and "do I still
+need the history of *that*" does.
+
+**Nothing here is offered until it is provably finished**, and finished is measured from
+the newest file anywhere inside a store rather than from the store's own timestamp. The
+distinction is not academic. A directory's mtime moves when an entry is added and *not*
+when one is written to, and a transcript is a file that gets appended to for as long as
+the session lasts — so a conversation running right now, or a month-old one resumed this
+morning, leaves every directory above it stamped with the day it was created:
+
+```console
+$ stat -f '%Sm' ~/.pi/agent/sessions/--Volumes-sourcecode-repos-cratis-Strategy--
+Aug 24 22:17:25          # the directory
+Aug 24 22:39:39          # the transcript inside it, still being written
+```
+
+Reading the first number offers a live session as idle. reap reads the second, and a
+store touched within the last **24 hours is never offered at all** — the one threshold
+here that `--stale-days 0` cannot lower, because a gap of hours is a claim about when
+reap happened to run rather than about whether anyone is coming back to that
+conversation. The same rule covers the safe tier, so a running background job protects
+its own log.
+
+Where a tool names its store after the project's path with the separators flattened
+(`-Volumes-sourcecode-reap`), reap resolves it back to a real directory. A dash is a legal
+character in a directory name, so the mapping is genuinely ambiguous — it is searched
+against the filesystem rather than guessed at, and a name that cannot be placed is shown
+as it is stored rather than as a confidently wrong path. What that buys is the one piece
+of proof this category has:
+
+```
+▲ Claude Code · Chronicle      2mo   443 MB   /Volumes/sourcecode/repos/cratis/Chronicle · every session for that project · nothing written for 2mo
+▲ pi · Screenplay-esm-kernel   5mo  3.71 MB   no directory of that name is on this machine now — deleted, renamed, or on a volume that is not mounted · nothing written for 5mo
+```
+
+That second row is worded the way it is on purpose. reap observed that nothing of that
+name is there; it did not observe a deletion, and from here an unplugged external disk is
+indistinguishable from a removed directory. The row states what was seen and leaves the
+conclusion to the person who knows whether they own that disk — and a name that is not a
+path at all, a workspace id or a hash, says only that reap cannot place it. None of the
+three changes the grading: if anything, a project that is no longer there makes its
+transcripts the last record of that work rather than the first thing safe to drop.
+
+The age column and the detail line both mean the same thing here — time since anything
+inside was last written — so the evidence the row rests on is on the row.
+
+`A` in the recipe palette takes the caches and the package trees and stops there.
+`--no-agents`, or `agents = false` under `[scan]`, turns the whole category off. An agent
+reap does not ship knowing about is an `[[agent]]` entry away, and `risk` defaults to
+irreversible there rather than to rebuildable — a directory under an agent's own tree is
+history until you say otherwise, and that default is only expensive in one direction.
 
 </details>
 
@@ -383,7 +497,7 @@ Every candidate carries a risk level, shown as a coloured dot and used by the co
 dialog:
 
 | | | |
-|---|---|---|
+| --- | --- | --- |
 | 🟢 | **safe** | regenerated automatically, nothing is lost |
 | 🟡 | **rebuildable** | costs time to rebuild or re-download, nothing is unrecoverable |
 | 🔴 | **irreversible** | may destroy work that exists nowhere else |
@@ -567,13 +681,15 @@ the supported code paths build and run in CI; it does not mean every filesystem 
 vendor cache location or enterprise policy is known.
 
 Rules naming a path a machine does not have simply do not apply, so one rule set covers
-all of them — the Xcode entries are inert on Linux, the `~/.cache/*` ones on macOS, the
-`%LOCALAPPDATA%` ones anywhere that is not Windows. A cache rule's `path` takes `~` for
+all of them — the Xcode entries are inert on Linux, the `%LOCALAPPDATA%` ones anywhere
+that is not Windows. Not `~/.cache`, which this used to claim was the Linux answer: a
+great deal of developer tooling is cross-platform first and writes there whatever the
+platform's own convention is, so it is swept on macOS too. A cache rule's `path` takes `~` for
 your home directory and `%VARIABLE%` for an environment variable, which is the whole of
 the branching. The pieces that genuinely differ:
 
 | | macOS | Linux | Windows |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Trash | `~/.Trash`, `<mount>/.Trashes/<uid>` | freedesktop `Trash/files` + `.trashinfo` | the shell's Recycle Bin |
 | Unnamed caches | `~/Library/Caches` | `$XDG_CACHE_HOME`, else `~/.cache` | — |
 | App data caches | `~/Library/Application Support` | `~/.config`, `~/.local/share` | `%APPDATA%`, `%LOCALAPPDATA%` |
@@ -616,7 +732,7 @@ evidence before deletion—especially anything irreversible.
 ## Keys
 
 | Key | |
-|---|---|
+| --- | --- |
 | `R` | **quick reap** — one key per standing decision |
 | `C` | **configuration** — every rule reap is working from, and the means to change it |
 | `L` | **legend** — what the marks mean, over whatever you are looking at |

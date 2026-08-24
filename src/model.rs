@@ -7,6 +7,11 @@ pub enum Category {
     Artifacts,
     Docker,
     Caches,
+    /// What the coding agents leave behind: their caches and package trees,
+    /// and the conversation history they keep per project. The first half is
+    /// ordinary debris; the second is graded like `Personal`, because nothing
+    /// regenerates a transcript.
+    Agents,
     /// Things that belong to the person rather than to the machine: downloads,
     /// installers, device backups. Graded far more carefully than the rest,
     /// because nothing here regenerates itself.
@@ -14,11 +19,12 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Git,
         Self::Artifacts,
         Self::Docker,
         Self::Caches,
+        Self::Agents,
         Self::Personal,
     ];
 
@@ -28,6 +34,7 @@ impl Category {
             Self::Artifacts => "Build artifacts",
             Self::Docker => "Docker",
             Self::Caches => "Caches",
+            Self::Agents => "Coding agents",
             Self::Personal => "Personal",
         }
     }

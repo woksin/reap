@@ -21,6 +21,7 @@ fn fixture() -> App {
         max_depth: 1,
         skip_docker: true,
         skip_caches: true,
+        skip_agents: true,
         skip_personal: true,
         scan_home_strays: false,
     };
@@ -204,6 +205,7 @@ fn empty_state_renders_without_items() {
         max_depth: 1,
         skip_docker: true,
         skip_caches: true,
+        skip_agents: true,
         skip_personal: true,
         scan_home_strays: false,
     };

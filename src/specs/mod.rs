@@ -17,6 +17,7 @@
 
 mod given;
 
+mod for_agent_triage;
 mod for_artifact_detection;
 mod for_branch_prunability;
 mod for_configuration_editing;

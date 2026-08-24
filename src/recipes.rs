@@ -150,6 +150,13 @@ pub fn builtin() -> Vec<RecipeRule> {
             RiskName::Rebuildable,
             &["caches/*"],
         ),
+        r(
+            'A',
+            "Coding agents · caches and packages",
+            "what the agents refill by being used · never a transcript",
+            RiskName::Rebuildable,
+            &["coding agents/*"],
+        ),
         // And the ones for a machine that is not primarily a build machine.
         // `c` covers these too, but it also covers nine gigabytes of NuGet
         // packages — which is the right answer for a developer and a
@@ -241,6 +248,20 @@ mod tests {
         assert!(safe.covers(&candidate(Category::Git, "merged branches", Risk::Safe)));
         assert!(safe.covers(&candidate(Category::Caches, "npm", Risk::Safe)));
         assert!(!safe.covers(&candidate(Category::Caches, "npm", Risk::Caution)));
+    }
+
+    #[test]
+    fn the_agent_recipe_never_reaches_the_conversation_history() {
+        // `A` exists to take the caches and package trees an agent refills by
+        // itself. Its session transcripts sit in the same category under the
+        // same group, and are the one thing on the machine that no tool and no
+        // rebuild brings back.
+        let recipes = compile(&Config::default());
+        let agents = recipes.iter().find(|r| r.key == 'A').unwrap();
+
+        assert!(agents.covers(&candidate(Category::Agents, "Claude Code", Risk::Safe)));
+        assert!(agents.covers(&candidate(Category::Agents, "Codex", Risk::Caution)));
+        assert!(!agents.covers(&candidate(Category::Agents, "Codex", Risk::Danger)));
     }
 
     #[test]
