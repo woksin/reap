@@ -322,8 +322,11 @@ changes its output.
 
 <br>
 
-**Developer tools** — npm, pnpm, yarn, bun, NuGet, Maven, Gradle, cargo, Go, pip, uv,
-Homebrew, Xcode DerivedData and device support, Playwright and Puppeteer browsers.
+**Developer tools** — npm and npx, pnpm, yarn (Classic *and* Berry, which keeps its store
+somewhere neither Classic path reaches), bun, NuGet, Maven, Gradle, cargo, Go, pip, uv,
+Homebrew, Pulumi providers, Xcode DerivedData and device support, Playwright and Puppeteer
+browsers, and the runtimes the version managers download — rustup toolchains, nvm's node
+versions — which come back from the manifest in each project that pins them.
 
 **Common application caches** — Chrome, Firefox, Safari, Edge and Brave caches
 (never a profile: you stay signed in); Adobe's media cache, waveform and Camera Raw
@@ -356,6 +359,24 @@ category, which can prove whether the work in them is pushed:
 The pnpm store is hard-linked into every `node_modules` on the machine, so it is handed to
 `pnpm store prune` rather than deleted out from under them. The Recycle Bin is emptied
 through the shell rather than unlinked, because it is indexed.
+
+**One entry here is graded like a personal file.** `~/.vscode/extensions` is routinely the
+largest directory on a developer machine that nothing else on this list reaches — 6.29 GB
+on the one this was written on. Every other cache above is safe to offer because the
+record of what to put back is a project file reap never touches: a `Cargo.toml`, a
+`package.json`, a `pom.xml`. This one's record is `extensions.json`, and it lives *inside*
+the directory. Take it and the extensions come back only if you can name all eighty, or if
+Settings Sync had them — and reap cannot see whether it did, so it does not claim to.
+
+The row is shown, because hiding the biggest thing on the disk is how disks stay full, and
+it is graded **irreversible** so nothing takes it without asking. If you sync, say so
+once:
+
+```toml
+[[override]]
+match = ["~/.vscode/extensions"]
+risk = "rebuildable"
+```
 
 </details>
 

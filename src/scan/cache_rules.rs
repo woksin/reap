@@ -370,6 +370,51 @@ const BUILTIN: &[BuiltinCache] = &[
         &[],
     ),
     (
+        "~/Library/Application Support/Code/CachedExtensionVSIXs",
+        "editors",
+        "VS Code extension downloads",
+        "the archives extensions were installed from · already unpacked",
+        RiskName::Safe,
+        &[],
+    ),
+    (
+        // Usually the largest single directory a developer machine has that no
+        // other rule here reaches, and the only one in this table graded like a
+        // personal file.
+        //
+        // Every package cache above is safe to offer because the record of what
+        // to put back is a project file reap never touches — a Cargo.toml, a
+        // package.json, a pom. This one's record is `extensions.json`, and it
+        // lives *inside* the directory. Take it and the extensions come back
+        // only if you can remember all eighty of them, or if Settings Sync had
+        // them. reap cannot see whether it did, so it does not claim to: the
+        // row is shown, because hiding the biggest thing on the disk is how
+        // disks stay full, and it is graded so that nothing takes it without
+        // being asked. Someone who syncs can say so with an `[[override]]`.
+        "~/.vscode/extensions",
+        "editors",
+        "VS Code extensions",
+        "downloaded extensions · the only record of which ones you had is inside them",
+        RiskName::Irreversible,
+        &[],
+    ),
+    (
+        "~/.rustup/toolchains",
+        "compilers",
+        "Rust toolchains",
+        "re-installed by rustup · which versions is in each project's manifest",
+        RiskName::Rebuildable,
+        &[],
+    ),
+    (
+        "~/.nvm/versions",
+        "compilers",
+        "Node versions",
+        "re-installed by nvm · which versions is in each project's .nvmrc",
+        RiskName::Rebuildable,
+        &[],
+    ),
+    (
         "~/.local/share/Trash",
         "system",
         "Trash",
@@ -850,6 +895,29 @@ mod tests {
                     "{label} ({path}) is graded safe but its detail says {word:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_rule_admitting_it_holds_the_only_record_is_not_graded_as_costing_time() {
+        // What separates every package cache here from the one directory in it
+        // that is graded like a personal file. A cache is safe to offer because
+        // the record of what to put back is a project file reap never touches;
+        // where that record is *inside* the directory instead, deleting it
+        // costs something no amount of waiting returns.
+        //
+        // Both recoverable tiers promise the same thing in different currencies
+        // — safe costs nothing, rebuildable costs time — and neither is true of
+        // bytes that are the only copy of something. So a rule that says as
+        // much in its own detail line has to be graded irreversible.
+        for (path, _, label, detail, risk, _) in BUILTIN {
+            let admits = ["only record", "only copy", "exists nowhere else"]
+                .iter()
+                .any(|word| detail.contains(word));
+            assert!(
+                !admits || *risk == RiskName::Irreversible,
+                "{label} ({path}) says it holds the only record and is graded {risk:?}"
+            );
         }
     }
 

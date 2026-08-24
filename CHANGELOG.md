@@ -94,12 +94,23 @@ on each tag are the generated list of pull requests.
   pi-lens joins the coding-agent category with its logs, project indexes,
   downloaded language servers and tool packages.
 
-  Deliberately **not** `~/.vscode/extensions`, though it is the largest single
-  uncovered directory on the machine this was surveyed on at 6.1 GB. Its
-  `extensions.json` is the only record of what you had installed and it lives
-  *inside* the directory, so there is no narrower thing to name and no manifest
-  left behind to reinstall from — unlike every package cache reap does offer,
-  where the manifest is a project file it never touches.
+  Also the runtimes the version managers download — rustup toolchains, nvm's
+  node versions — which come back from the manifest in each project that pins
+  them, and VS Code's cached extension archives.
+- **`~/.vscode/extensions`, graded like a personal file.** Routinely the largest
+  directory on a developer machine that no other rule reaches: 6.29 GB on the
+  one this was surveyed on. Every other cache is safe to offer because the
+  record of what to put back is a project file reap never touches — a
+  `Cargo.toml`, a `package.json`. This one's record is `extensions.json` and it
+  lives *inside* the directory, so there is no narrower thing to name and
+  nothing left behind to reinstall from unless Settings Sync had it, which reap
+  cannot see and does not claim to.
+
+  Shown anyway, because hiding the biggest thing on the disk is how disks stay
+  full, and graded **irreversible** so no recipe and no unattended `--reap`
+  below the irreversible ceiling can take it. Someone who syncs can say so with
+  an `[[override]]`. A rule whose own detail line admits it holds the only
+  record of something is now held to that grading by a test.
 - **Windows support.** Built and tested in CI alongside macOS and Linux, and
   published as the executable itself — `reap-windows-x86_64.exe` and
   `reap-windows-x86.exe` — since a fresh Windows has nothing that unpacks a
