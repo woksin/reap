@@ -32,6 +32,10 @@ const fn category_color(cat: Category) -> Color {
         Category::Artifacts => Color::Rgb(129, 199, 245),
         Category::Docker => Color::Rgb(126, 231, 219),
         Category::Caches => Color::Rgb(252, 191, 122),
+        // Green: the one category whose rows are mostly about work rather
+        // than about the machine, and the only one that is new enough to need
+        // telling apart at a glance.
+        Category::Agents => Color::Rgb(150, 219, 165),
         Category::Personal => Color::Rgb(196, 181, 253),
     }
 }

@@ -28,6 +28,10 @@ pub struct Config {
     /// Replace the built-in cache rules entirely rather than adding to them.
     #[serde(skip_serializing_if = "is_false")]
     pub replace_builtin_caches: bool,
+    /// Replace the built-in coding-agent rules entirely rather than adding to
+    /// them.
+    #[serde(skip_serializing_if = "is_false")]
+    pub replace_builtin_agents: bool,
     /// Replace the built-in quick-reap recipes entirely rather than adding to
     /// them. A user whose work does not look like the built-in assumptions
     /// wants their own keys, not their own keys plus mine.
@@ -41,6 +45,8 @@ pub struct Config {
     pub artifacts: Vec<ArtifactRule>,
     #[serde(rename = "cache", skip_serializing_if = "Vec::is_empty")]
     pub caches: Vec<CacheRule>,
+    #[serde(rename = "agent", skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentRule>,
     #[serde(rename = "recipe", skip_serializing_if = "Vec::is_empty")]
     pub recipes: Vec<RecipeRule>,
     #[serde(rename = "override", skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +78,10 @@ pub struct ScanSection {
     pub docker: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caches: Option<bool>,
+    /// What the coding agents leave behind. Their session history is the only
+    /// copy of it, so this can be turned off wholesale like `personal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personal: Option<bool>,
 }
@@ -110,6 +120,41 @@ pub struct CacheRule {
     /// bookkeeping — `["pnpm", "store", "prune"]`.
     #[serde(default)]
     pub prune: Vec<String>,
+}
+
+/// A directory a coding agent keeps, and what it costs to lose it.
+///
+/// Deliberately the same shape as a cache rule minus `prune`, because it is the
+/// same kind of statement: this path, this is what it is, this is what losing
+/// it costs. What makes it its own table is where the row lands and how it is
+/// graded — the agent category exists to keep conversation history from being
+/// filed beside a package cache.
+///
+/// The tools reap ships knowing about get more than this: their session stores
+/// are broken up per project, and the project resolved back to a checkout. That
+/// is a scheme rather than a path, so it cannot be written down here. A store
+/// named by a rule is offered whole, which is the honest thing for a layout
+/// reap has not been taught to read.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRule {
+    /// Path, `~` and `%VARIABLE%` accepted.
+    pub path: String,
+    /// The tool it belongs to. Groups the rows.
+    #[serde(default)]
+    pub tool: String,
+    pub label: String,
+    #[serde(default)]
+    pub detail: String,
+    /// Defaults to irreversible rather than to rebuildable, unlike everywhere
+    /// else. A directory under an agent's own tree is history until someone
+    /// says otherwise, and the cost of that default being wrong runs one way.
+    #[serde(default = "default_agent_risk")]
+    pub risk: RiskName,
+}
+
+const fn default_agent_risk() -> RiskName {
+    RiskName::Irreversible
 }
 
 /// Re-grade what reap considers something to cost.
@@ -352,6 +397,7 @@ never_descend = [
 # Use only the rules below, ignoring everything reap ships with.
 # replace_builtin_artifacts = false
 # replace_builtin_caches = false
+# replace_builtin_agents = false
 # replace_builtin_recipes = false
 
 # ---------------------------------------------------------------------------
@@ -370,6 +416,12 @@ never_descend = [
 # trash = false                  # trash path removals; commands are unchanged
 # docker = true                  # set false to skip the Docker scan
 # caches = true                  # set false to skip the cache scan
+
+# What the coding agents leave behind: caches and package trees under
+# ~/.claude, ~/.codex, ~/.pi and friends, plus the conversation history they
+# keep per project. The caches are graded like any other cache; the transcripts
+# are graded irreversible, because nothing regenerates one.
+# agents = true
 
 # Your own files: old downloads, installers, phone backups. Everything here is
 # graded irreversible: a filename cannot prove an installer is publicly
@@ -415,6 +467,34 @@ never_descend = [
 # group = "package managers"
 # label = "my-tool cache"
 # risk = "safe"
+
+# ---------------------------------------------------------------------------
+# Extra coding-agent directories
+# ---------------------------------------------------------------------------
+# For an agent reap does not ship knowing about. Same idea as a cache, filed
+# under the agent category instead — which is what keeps a directory of
+# transcripts from being listed beside a package cache.
+#
+# `risk` defaults to irreversible here rather than to rebuildable: a directory
+# under an agent's own tree is conversation history until you say otherwise,
+# and that default is only expensive in one direction.
+#
+# Name the narrowest directory that holds one kind of thing. A tool's own
+# directory usually mixes its cache with the record of what you installed, and
+# a rule naming the parent takes both.
+#
+# [[agent]]
+# path = "~/.my-agent/cache"
+# tool = "my-agent"
+# label = "my-agent cache"
+# detail = "rebuilt as you use it"
+# risk = "safe"
+#
+# [[agent]]
+# path = "~/.my-agent/sessions"
+# tool = "my-agent"
+# label = "my-agent session history"
+# detail = "every conversation it has kept"
 
 # ---------------------------------------------------------------------------
 # Re-grade what something costs you

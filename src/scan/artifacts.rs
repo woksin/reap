@@ -113,6 +113,9 @@ const BUILTIN: &[BuiltinArtifact] = &[
         RiskName::Rebuildable,
     ),
     ("__pycache__", &[], "python", RiskName::Safe),
+    // Aider's repository map, written into whatever project it was run in.
+    // Named after its own cache format, so the name alone is proof.
+    (".aider.tags.cache.v3", &[], "aider", RiskName::Safe),
     (".pytest_cache", &[], "pytest", RiskName::Safe),
     (".mypy_cache", &[], "mypy", RiskName::Safe),
     (".ruff_cache", &[], "ruff", RiskName::Safe),

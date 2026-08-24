@@ -54,6 +54,50 @@ pub fn dir_size(path: &Path) -> u64 {
         .sum()
 }
 
+/// The newest modification time anywhere under `path`, including `path` itself.
+///
+/// A directory's own mtime answers a narrower question than it looks like it
+/// does: it moves when an entry is added, removed or renamed, and not when one
+/// is written to. A process appending to a file it already created leaves every
+/// directory above it untouched — so a tree can be under active use and still
+/// carry a timestamp from the day it was made.
+///
+/// That distinction does not matter for build output, which is rewritten
+/// wholesale. It matters a great deal for anything appended to a line at a
+/// time, which is how every agent writes a transcript and how every long
+/// running job writes a log.
+///
+/// Returned in whole seconds since the epoch. `None` means nothing here could
+/// be read at all, which is never taken as evidence that nothing was written.
+pub fn newest_mtime(path: &Path) -> Option<u64> {
+    let secs = |m: &fs::Metadata| {
+        m.modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    };
+
+    let own = fs::symlink_metadata(path).ok()?;
+    if !own.is_dir() {
+        return secs(&own);
+    }
+
+    let entries: Vec<_> = fs::read_dir(path).ok()?.flatten().collect();
+    let deepest = entries
+        .par_iter()
+        .filter_map(|e| match e.file_type() {
+            // As with `dir_size`: `read_dir` file types do not follow symlinks,
+            // so a link farm contributes nothing and a cycle cannot trap this.
+            Ok(ft) if ft.is_dir() => newest_mtime(&e.path()),
+            Ok(ft) if ft.is_file() => e.metadata().ok().as_ref().and_then(secs),
+            _ => None,
+        })
+        .max();
+
+    secs(&own).max(deepest).or(deepest)
+}
+
 /// Size of a path whether it is a file or a directory.
 pub fn path_size(path: &Path) -> u64 {
     match fs::symlink_metadata(path) {
@@ -199,5 +243,68 @@ pub fn tilde(path: &Path) -> String {
             }
         }
         None => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_newest_write_is_found_where_no_directory_timestamp_records_it() {
+        // The case the whole function exists for. A process appending to a file
+        // it already created leaves every directory above it untouched, so a
+        // tree in active use keeps the timestamp of the day it was made. Read
+        // that timestamp and a conversation happening right now is reported as
+        // months idle.
+        let root =
+            std::env::temp_dir().join(format!("reap-newest-{}-{}", std::process::id(), line!()));
+        let deep = root.join("projects/one");
+        fs::create_dir_all(&deep).unwrap();
+        let transcript = deep.join("session.jsonl");
+        fs::write(&transcript, b"{}\n").unwrap();
+
+        // Age everything, deepest first, the way a finished store looks.
+        let long_ago = SystemTime::now() - Duration::from_secs(90 * 86_400);
+        for path in [transcript.as_path(), deep.as_path(), root.as_path()] {
+            fs::File::open(path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        assert_eq!(
+            age_days(&root),
+            Some(90),
+            "the fixture must start out looking finished"
+        );
+
+        // Now append, exactly as a resumed session does.
+        let now = SystemTime::now();
+        fs::File::open(&transcript)
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
+
+        assert_eq!(
+            age_days(&root),
+            Some(90),
+            "the directory's own timestamp is expected to miss this"
+        );
+        let newest = newest_mtime(&root).expect("a readable tree");
+        assert!(
+            now_secs().saturating_sub(newest) < 60,
+            "the append must be found: {} seconds old",
+            now_secs().saturating_sub(newest)
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unreadable_path_reports_nothing_rather_than_a_time() {
+        // Not being able to tell must never come back as "nothing was written",
+        // which is the answer that would make a store look finished.
+        assert_eq!(newest_mtime(Path::new("/nonexistent/reap/tree")), None);
     }
 }

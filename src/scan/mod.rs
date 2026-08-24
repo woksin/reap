@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod artifacts;
 pub mod cache_rules;
 pub mod caches;
@@ -15,6 +16,7 @@ use std::thread;
 pub struct Rules {
     pub artifacts: Vec<crate::config::ArtifactRule>,
     pub caches: Vec<crate::config::CacheRule>,
+    pub agents: Vec<crate::config::AgentRule>,
     pub ignore: crate::config::IgnoreSet,
     /// Re-gradings the user asked for, in the order they wrote them.
     overrides: Vec<(crate::config::IgnoreSet, crate::model::Risk)>,
@@ -47,6 +49,13 @@ impl Rules {
         };
         caches.extend(cfg.caches.iter().cloned());
 
+        let mut agents = if cfg.replace_builtin_agents {
+            Vec::new()
+        } else {
+            agents::builtin_rules()
+        };
+        agents.extend(cfg.agents.iter().cloned());
+
         let mut never_descend: Vec<String> = BUILTIN_NEVER_DESCEND
             .iter()
             .map(|s| (*s).to_string())
@@ -56,6 +65,7 @@ impl Rules {
         Self {
             artifacts,
             caches,
+            agents,
             ignore: crate::config::IgnoreSet::new(&cfg.ignore),
             overrides: cfg
                 .overrides
@@ -121,6 +131,7 @@ pub struct ScanOpts {
     pub max_depth: usize,
     pub skip_docker: bool,
     pub skip_caches: bool,
+    pub skip_agents: bool,
     pub skip_personal: bool,
     /// Also look for stray build output sitting directly in `$HOME`.
     ///
@@ -141,6 +152,7 @@ impl Default for ScanOpts {
             max_depth: 8,
             skip_docker: false,
             skip_caches: false,
+            skip_agents: false,
             skip_personal: false,
             scan_home_strays: true,
         }
@@ -227,6 +239,16 @@ pub fn spawn_all(opts: ScanOpts, tx: Sender<ScanEvent>) {
                 caches::scan(&opts, &tx);
             }
             let _ = tx.send(ScanEvent::Done(Category::Caches));
+        });
+    }
+    {
+        let opts = opts.clone();
+        let tx = tx.clone();
+        thread::spawn(move || {
+            if !opts.skip_agents {
+                agents::scan(&opts, &tx);
+            }
+            let _ = tx.send(ScanEvent::Done(Category::Agents));
         });
     }
     {
@@ -403,10 +425,43 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_rule_from_the_config_joins_the_built_in_ones() {
+        // A tool reap does not ship knowing about has to be reachable without a
+        // recompile, like every other thing the scanners know.
+        let mut cfg = Config::default();
+        cfg.agents.push(crate::config::AgentRule {
+            path: "~/.my-agent/sessions".into(),
+            tool: "my-agent".into(),
+            label: "my-agent sessions".into(),
+            detail: String::new(),
+            risk: RiskName::Irreversible,
+        });
+        let rules = Rules::from_config(&cfg);
+
+        assert!(rules.agents.iter().any(|r| r.tool == "my-agent"));
+        assert!(
+            rules.agents.iter().any(|r| r.path.starts_with("~/.codex")),
+            "built-ins must survive"
+        );
+    }
+
+    #[test]
+    fn an_agent_rule_that_says_nothing_about_risk_is_treated_as_history() {
+        // The default runs the other way here than everywhere else in the
+        // config. Someone naming a directory under an agent's own tree and not
+        // saying what it costs is describing conversation history far more
+        // often than a cache, and only one of those two guesses is expensive.
+        let cfg: Config =
+            toml::from_str("[[agent]]\npath = \"~/.x/sessions\"\nlabel = \"x\"\n").unwrap();
+        assert_eq!(cfg.agents[0].risk, RiskName::Irreversible);
+    }
+
+    #[test]
     fn replacing_the_built_ins_drops_them_entirely() {
         let mut cfg = Config {
             replace_builtin_artifacts: true,
             replace_builtin_caches: true,
+            replace_builtin_agents: true,
             ..Default::default()
         };
         cfg.artifacts.push(ArtifactRule {
@@ -427,6 +482,7 @@ mod tests {
         let rules = Rules::from_config(&cfg);
         assert_eq!(rules.artifacts.len(), 1);
         assert_eq!(rules.caches.len(), 1);
+        assert!(rules.agents.is_empty());
         assert_eq!(rules.artifacts[0].dir, "only-this");
     }
 
