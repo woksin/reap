@@ -206,6 +206,36 @@ const SCRATCH: &[Scratch] = &[
         "what each session was doing when it ended",
         RiskName::Irreversible,
     ),
+    // -- pi-lens -----------------------------------------------------------
+    (
+        "~/.pi-lens/logs",
+        "pi-lens",
+        "pi-lens logs",
+        "what the tool wrote down about itself",
+        RiskName::Safe,
+    ),
+    (
+        "~/.pi-lens/projects",
+        "pi-lens",
+        "pi-lens project indexes",
+        "the index it searches · rebuilt by re-reading the project",
+        RiskName::Rebuildable,
+    ),
+    (
+        "~/.pi-lens/bin",
+        "pi-lens",
+        "pi-lens binaries",
+        "downloaded language servers and scanners · fetched again on demand",
+        RiskName::Rebuildable,
+    ),
+    (
+        // The manifest beside this is what reinstalls them, as with pi's own.
+        "~/.pi-lens/tools/node_modules",
+        "pi-lens",
+        "pi-lens tool packages",
+        "installed tooling · re-installed from the manifest beside it",
+        RiskName::Rebuildable,
+    ),
     // -- opencode ----------------------------------------------------------
     (
         "~/.local/share/opencode/log",
@@ -867,8 +897,15 @@ mod tests {
         // make. Matched on the path rather than on the grading, so a rule added
         // later is checked against what it names rather than against what
         // whoever added it believed.
+        // "projects" is deliberately not among these. It describes a layout —
+        // one directory per project — and says nothing about what is in them:
+        // `~/.claude/projects` holds transcripts, `~/.pi-lens/projects` holds
+        // search indexes that are rebuilt by re-reading the code. A guard that
+        // cannot tell those apart would force the wrong grading onto whichever
+        // one it met second, which is a test dictating a false fact rather than
+        // catching one.
         for (path, _, label, _, risk) in SCRATCH {
-            let holds_history = ["session", "history", "storage", "state", "projects"]
+            let holds_history = ["session", "history", "storage", "state"]
                 .iter()
                 .any(|word| path.contains(word));
             assert!(

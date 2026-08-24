@@ -12,6 +12,24 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A checkout is no longer offered as a cache.** The unnamed cache sweep
+  reported anything large it did not recognise as "rebuilt by the owning app",
+  at the rebuildable tier — which a quick recipe takes without a typed
+  confirmation. Tools that build in a scratch directory leave git worktrees
+  under a cache root, and nothing rebuilds a commit that was never pushed. The
+  sweep now declines a directory that is, or just contains, a checkout and
+  leaves it to the Git category, which can prove whether the work in it is
+  pushed. This shipped on Linux, where `~/.cache` was already the swept root.
+- **`~/.cache` is swept on macOS too.** It was treated as the Linux answer and
+  `~/Library/Caches` as the macOS one, as though a machine had only whichever
+  its vendor chose. A great deal of developer tooling is cross-platform first
+  and writes to `~/.cache` wherever it runs — and rules naming `~/.cache/...`
+  were quietly matching there all along, while the sweep that catches
+  everything else never looked. Worth about 1.5 GB on the machine this was
+  found on.
+
 ### Added
 
 - **A `Coding agents` category.** The tools that write the debris this project
@@ -69,6 +87,19 @@ on each tag are the generated list of pull requests.
   under an agent's own tree is history until someone says otherwise. Aider's
   per-project `.aider.tags.cache.v3` is recognised as a build artifact, since
   its name alone is proof of what it is.
+- **Caches no rule reached.** Yarn Berry keeps its store at `~/.yarn/berry`
+  rather than in either of the two places Yarn Classic used, so neither rule
+  covered it; `~/.npm/_npx` is a second npm cache beside `_cacache`; Pulumi's
+  downloaded providers and logs; rustup's part-downloads and scratch files.
+  pi-lens joins the coding-agent category with its logs, project indexes,
+  downloaded language servers and tool packages.
+
+  Deliberately **not** `~/.vscode/extensions`, though it is the largest single
+  uncovered directory on the machine this was surveyed on at 6.1 GB. Its
+  `extensions.json` is the only record of what you had installed and it lives
+  *inside* the directory, so there is no narrower thing to name and no manifest
+  left behind to reinstall from — unlike every package cache reap does offer,
+  where the manifest is a project file it never touches.
 - **Windows support.** Built and tested in CI alongside macOS and Linux, and
   published as the executable itself — `reap-windows-x86_64.exe` and
   `reap-windows-x86.exe` — since a fresh Windows has nothing that unpacks a

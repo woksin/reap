@@ -337,9 +337,21 @@ into the app's own data directory, where no platform's cache sweep ever looks. r
 `~/Library/Application Support`, `~/.config`, `%APPDATA%` and `%LOCALAPPDATA%` for those
 names exactly, and reports them grouped by the app that owns them.
 
-Plus anything over 200 MB in the platform's cache root that no rule already names — and
-if a rule names something *inside* one of those directories, reap steps around it rather
-than over it, so the same gigabytes are never offered twice under two different labels.
+Plus anything over 200 MB in a cache root that no rule already names — `~/Library/Caches`
+and `~/.cache` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere. If a rule names
+something *inside* one of those directories, reap steps around it rather than over it, so
+the same gigabytes are never offered twice under two different labels.
+
+**A checkout is never offered as a cache**, however it got there. Tools that build in a
+scratch directory leave git worktrees under a cache root, and this sweep's claim is that
+the owning application rebuilds what it takes — which is exactly wrong about a
+repository, and wrong in the direction that loses commits. Those are left to the Git
+category, which can prove whether the work in them is pushed:
+
+```
+▲ Screenplay.Generation: ~/.cache/pi-worktrees/Generation-bare-specification-rejection
+  [fix/bare-specification-rejection] 22 ignored files may exist only here; commits are all pushed
+```
 
 The pnpm store is hard-linked into every `node_modules` on the machine, so it is handed to
 `pnpm store prune` rather than deleted out from under them. The Recycle Bin is emptied
@@ -648,8 +660,10 @@ the supported code paths build and run in CI; it does not mean every filesystem 
 vendor cache location or enterprise policy is known.
 
 Rules naming a path a machine does not have simply do not apply, so one rule set covers
-all of them — the Xcode entries are inert on Linux, the `~/.cache/*` ones on macOS, the
-`%LOCALAPPDATA%` ones anywhere that is not Windows. A cache rule's `path` takes `~` for
+all of them — the Xcode entries are inert on Linux, the `%LOCALAPPDATA%` ones anywhere
+that is not Windows. Not `~/.cache`, which this used to claim was the Linux answer: a
+great deal of developer tooling is cross-platform first and writes there whatever the
+platform's own convention is, so it is swept on macOS too. A cache rule's `path` takes `~` for
 your home directory and `%VARIABLE%` for an environment variable, which is the whole of
 the branching. The pieces that genuinely differ:
 
