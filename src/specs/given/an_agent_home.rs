@@ -89,6 +89,11 @@ impl an_agent_home {
     }
 
     /// Sessions held for a project that is no longer on disk.
+    ///
+    /// Only meaningful where a flattened name can be resolved back to a path at
+    /// all, which is the unix scheme — so the one scenario that uses this is
+    /// unix-only, and so is this.
+    #[cfg(unix)]
     pub fn with_sessions_for_a_project_since_deleted(self, name: &str, bytes: usize) -> Self {
         let gone = self.projects().join(name);
         self.holding(&flatten(&gone), bytes)

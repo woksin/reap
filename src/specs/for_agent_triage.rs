@@ -36,6 +36,16 @@ fn only(found: &[Candidate]) -> &Candidate {
     &found[0]
 }
 
+// Resolving a flattened name back to a checkout reads the scheme the unix
+// tools write: an absolute path starting at a separator. A Windows path starts
+// at a drive instead, and how each tool spells that is something reap would
+// have to be shown rather than assume — so there it names the store as stored
+// and says it cannot place it. The scenarios that turn on resolution are
+// therefore about unix, and say so here rather than by quietly failing in CI.
+// Everything that does not depend on it — the freshness floor, the month
+// layout, an unreadable name, a configured rule — is specified on every
+// platform.
+#[cfg(unix)]
 mod when_an_agent_holds_sessions_for_a_project_that_still_exists {
     use super::*;
 
@@ -88,6 +98,7 @@ mod when_an_agent_holds_sessions_for_a_project_that_still_exists {
     }
 }
 
+#[cfg(unix)]
 mod when_no_project_of_that_name_is_on_the_machine_any_more {
     use super::*;
 
@@ -220,6 +231,22 @@ mod when_a_session_is_still_being_written_to {
         // a running session are months old, because appending to the transcript
         // never touched them, so a scanner reading the directory would print a
         // row that looks exactly like the ones that are safe to act on.
+        //
+        // Counted rather than named, so this holds on a platform where the
+        // store cannot be resolved back to a project and the row carries the
+        // raw name. What is under specification is which of the two survives,
+        // not what it is called.
+        assert_eq!(
+            BECAUSE.len(),
+            1,
+            "the live session must be withheld and the finished one kept: {:?}",
+            labels(&BECAUSE)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn should_keep_the_one_that_is_finished() {
         assert_eq!(labels(&BECAUSE), ["an agent · finished-work"]);
     }
 }

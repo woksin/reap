@@ -251,6 +251,31 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Open a file *or a directory* in a way that permits setting its times.
+    ///
+    /// The two platforms disagree about what that takes and both refuse the
+    /// other's answer. `futimens` works through a read-only descriptor, and a
+    /// directory cannot be opened any other way on unix; Windows wants the
+    /// attribute-write right named explicitly and will not open a directory at
+    /// all without backup semantics. This test ages directories, so a plain
+    /// `File::open` passes everywhere it is developed and fails in CI.
+    #[cfg(unix)]
+    fn open_to_set_times(path: &Path) -> std::io::Result<fs::File> {
+        fs::File::open(path)
+    }
+
+    #[cfg(windows)]
+    fn open_to_set_times(path: &Path) -> std::io::Result<fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+
     #[test]
     fn the_newest_write_is_found_where_no_directory_timestamp_records_it() {
         // The case the whole function exists for. A process appending to a file
@@ -268,7 +293,7 @@ mod tests {
         // Age everything, deepest first, the way a finished store looks.
         let long_ago = SystemTime::now() - Duration::from_secs(90 * 86_400);
         for path in [transcript.as_path(), deep.as_path(), root.as_path()] {
-            fs::File::open(path)
+            open_to_set_times(path)
                 .unwrap()
                 .set_modified(long_ago)
                 .unwrap();
@@ -281,7 +306,7 @@ mod tests {
 
         // Now append, exactly as a resumed session does.
         let now = SystemTime::now();
-        fs::File::open(&transcript)
+        open_to_set_times(&transcript)
             .unwrap()
             .set_modified(now)
             .unwrap();

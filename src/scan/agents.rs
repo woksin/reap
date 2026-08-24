@@ -599,6 +599,13 @@ fn resolve_project(slug: &str) -> Origin {
     // hash, a workspace id — and guessing at it would put a confident wrong
     // path in front of someone.
     //
+    // A Windows path is one of those shapes. It starts at a drive rather than
+    // at a separator, and how each tool spells that when flattening it is not
+    // something reap has been shown rather than something it could assume. So
+    // a store written on Windows is named as it is stored and says reap cannot
+    // place it, which costs a label and claims nothing untrue — the row, its
+    // size and its grading are all unaffected.
+    //
     // How many dashes stand in for that separator is not agreed on: one tool
     // writes `-Volumes-sourcecode-reap`, another `--Volumes-sourcecode-reap--`.
     // Empty parts are dropped rather than counted, since neither spelling means
@@ -738,6 +745,11 @@ mod tests {
         // never had.
         assert_eq!(resolve_project("9f3c1ab2"), Origin::Opaque);
         assert_eq!(resolve_project("some-workspace-id"), Origin::Opaque);
+        // A flattened Windows path, which starts at a drive rather than at a
+        // separator. Specified rather than left to fall out of the leading-dash
+        // check by accident: reap has not been shown how each tool spells a
+        // drive, so it says so instead of inventing one.
+        assert_eq!(resolve_project("C--Users-me-project"), Origin::Opaque);
         // Nothing but separators names no directory, and the root is not a
         // project. Answering `/` here would offer to delete a store while
         // claiming it belonged to the whole filesystem.
