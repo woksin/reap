@@ -26,7 +26,7 @@
 
 use super::ScanOpts;
 use crate::config::{AgentRule, RiskName, expand};
-use crate::model::{Action, Candidate, Category, Risk, ScanEvent};
+use crate::model::{Action, Candidate, Category, Eligibility, Risk, ScanEvent};
 use crate::util::{human_age, now_secs, tilde};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -314,7 +314,7 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
             if size < opts.min_size {
                 return;
             }
-            let Some(idle) = settled(path) else {
+            let Some((idle, eligibility)) = activity(path) else {
                 return;
             };
             let detail = if rule.detail.is_empty() {
@@ -331,7 +331,8 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
                 rule.risk.into(),
                 Action::Remove(path.clone()),
             )
-            .with_age(Some(idle));
+            .with_age(Some(idle))
+            .with_eligibility(eligibility);
             super::emit(tx, opts, cand);
         });
 
@@ -367,7 +368,7 @@ pub fn per_project(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEve
         if size < opts.min_size {
             return;
         }
-        let Some(idle) = settled(path) else {
+        let Some((idle, eligibility)) = activity(path) else {
             return;
         };
         let slug = file_name(path);
@@ -390,7 +391,7 @@ pub fn per_project(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEve
                 "reap cannot tell which project this belongs to".to_owned(),
             ),
         };
-        let detail = format!("{whose} · nothing written for {}", human_age(idle));
+        let detail = format!("{whose} · {}", activity_phrase(idle, eligibility));
         let cand = Candidate::new(
             Category::Agents,
             tool,
@@ -403,7 +404,8 @@ pub fn per_project(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEve
             Risk::Danger,
             Action::Remove(path.clone()),
         )
-        .with_age(Some(idle));
+        .with_age(Some(idle))
+        .with_eligibility(eligibility);
         super::emit(tx, opts, cand);
     });
 }
@@ -439,7 +441,7 @@ pub fn by_month(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>
             if size < opts.min_size {
                 return;
             }
-            let Some(idle) = settled(path) else {
+            let Some((idle, eligibility)) = activity(path) else {
                 return;
             };
             let cand = Candidate::new(
@@ -447,15 +449,16 @@ pub fn by_month(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>
                 tool,
                 format!("{tool} sessions · {when}"),
                 format!(
-                    "{} · transcripts of every session that month · nothing written for {}",
+                    "{} · transcripts of every session that month · {}",
                     tilde(path),
-                    human_age(idle)
+                    activity_phrase(idle, eligibility)
                 ),
                 size,
                 Risk::Danger,
                 Action::Remove(path.clone()),
             )
-            .with_age(Some(idle));
+            .with_age(Some(idle))
+            .with_eligibility(eligibility);
             super::emit(tx, opts, cand);
         });
 }
@@ -472,7 +475,7 @@ fn whole_store(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>)
     if size < opts.min_size {
         return;
     }
-    let Some(idle) = settled(root) else {
+    let Some((idle, eligibility)) = activity(root) else {
         return;
     };
     let cand = Candidate::new(
@@ -480,21 +483,21 @@ fn whole_store(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>)
         tool,
         format!("{tool} sessions"),
         format!(
-            "{} · reap does not recognise how these are filed, so it offers them whole · \
-             nothing written for {}",
+            "{} · reap does not recognise how these are filed, so it offers them whole · {}",
             tilde(root),
-            human_age(idle)
+            activity_phrase(idle, eligibility)
         ),
         size,
         Risk::Danger,
         Action::Remove(root.to_path_buf()),
     )
-    .with_age(Some(idle));
+    .with_age(Some(idle))
+    .with_eligibility(eligibility);
     super::emit(tx, opts, cand);
 }
 
 /// How recently anything can have been written and the store still be called
-/// finished.
+/// finished rather than shown as active.
 ///
 /// This is a floor rather than a preference, and the one threshold here that
 /// `--stale-days 0` cannot lower. A day is not a guess at how long a session
@@ -502,7 +505,7 @@ fn whole_store(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>)
 /// is a claim about the tool rather than about the moment reap happened to run.
 const SETTLED_AFTER_SECS: u64 = 24 * 60 * 60;
 
-/// How long a store has been finished, or `None` if it cannot be called that.
+/// How long a store has been idle and whether it is still active.
 ///
 /// Everything else in this category rests on this answer, so it is taken from
 /// the newest thing anywhere inside rather than from the directory's own
@@ -517,11 +520,25 @@ const SETTLED_AFTER_SECS: u64 = 24 * 60 * 60;
 /// looks exactly like the rows that are safe to act on.
 ///
 /// An unreadable tree yields `None`. Not being able to tell is never recorded
-/// as having nothing to tell.
-fn settled(path: &Path) -> Option<u64> {
+/// as inactivity. A live tree is returned as `Active`, visible for accounting
+/// but without a selectable action.
+fn activity(path: &Path) -> Option<(u64, Eligibility)> {
     let newest = crate::util::newest_mtime(path)?;
     let idle = now_secs().saturating_sub(newest);
-    (idle >= SETTLED_AFTER_SECS).then_some(idle / 86_400)
+    let eligibility = if idle < SETTLED_AFTER_SECS {
+        Eligibility::Active
+    } else {
+        Eligibility::Reclaimable
+    };
+    Some((idle / 86_400, eligibility))
+}
+
+fn activity_phrase(idle_days: u64, eligibility: Eligibility) -> String {
+    if eligibility == Eligibility::Active {
+        "written within the last day · active and not selectable".to_string()
+    } else {
+        format!("nothing written for {}", human_age(idle_days))
+    }
 }
 
 /// The subdirectories of `dir`, sorted, symlinks excluded.

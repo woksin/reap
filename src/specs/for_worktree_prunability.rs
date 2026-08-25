@@ -4,7 +4,7 @@
 //! matter: files never committed, and commits no remote can reach.
 
 use super::given::a_repository::a_repository;
-use crate::model::{Candidate, Risk};
+use crate::model::{Candidate, Eligibility, Risk};
 use std::sync::LazyLock;
 
 fn the_worktree<'a>(candidates: &'a [Candidate], name: &str) -> &'a Candidate {
@@ -66,7 +66,7 @@ mod when_a_worktree_is_clean_and_fully_pushed {
     }
 }
 
-mod when_a_worktree_holds_commits_no_remote_has {
+mod when_an_attached_worktree_holds_commits_no_remote_has {
     use super::*;
 
     static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
@@ -76,20 +76,67 @@ mod when_a_worktree_holds_commits_no_remote_has {
     });
 
     #[test]
-    fn should_consider_it_irreversible() {
-        // Clean on disk, but the commits exist nowhere else.
-        assert_eq!(the_worktree(&BECAUSE, "wip-checkout").risk, Risk::Danger);
+    fn should_consider_the_checkout_rebuildable() {
+        // `git worktree remove` leaves the attached branch and every commit it
+        // names in the shared repository. Not pushed is not lost here.
+        assert_eq!(the_worktree(&BECAUSE, "wip-checkout").risk, Risk::Caution);
     }
 
     #[test]
-    fn should_say_the_commits_exist_only_there() {
+    fn should_say_the_commits_remain_reachable() {
         assert!(
             the_worktree(&BECAUSE, "wip-checkout")
                 .detail
-                .contains("exist only here"),
+                .contains("remain reachable"),
             "detail was: {}",
             the_worktree(&BECAUSE, "wip-checkout").detail
         );
+    }
+}
+
+mod when_a_detached_worktree_has_a_commit_no_ref_names {
+    use super::*;
+
+    static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
+        a_repository::new()
+            .with_a_detached_worktree_holding_unique_commit("detached-checkout")
+            .candidates()
+    });
+
+    #[test]
+    fn should_consider_removing_it_irreversible() {
+        assert_eq!(
+            the_worktree(&BECAUSE, "detached-checkout").risk,
+            Risk::Danger
+        );
+    }
+
+    #[test]
+    fn should_say_no_surviving_ref_names_the_commit() {
+        assert!(
+            the_worktree(&BECAUSE, "detached-checkout")
+                .detail
+                .contains("no surviving ref")
+        );
+    }
+}
+
+mod when_an_agent_worktree_directory_is_no_longer_registered {
+    use super::*;
+    use crate::model::Eligibility;
+
+    static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
+        a_repository::new()
+            .with_an_orphaned_agent_worktree("orphan-checkout")
+            .candidates()
+    });
+
+    #[test]
+    fn should_catalogue_it_without_offering_a_blind_recursive_delete() {
+        let orphan = the_worktree(&BECAUSE, "orphan-checkout");
+        assert_eq!(orphan.eligibility, Eligibility::Protected);
+        assert!(!orphan.selectable());
+        assert!(orphan.detail.contains("inspect manually"));
     }
 }
 
@@ -160,7 +207,7 @@ mod when_a_repository_has_a_stash {
     fn the_stash() -> &'static Candidate {
         BECAUSE
             .iter()
-            .find(|c| c.group == "old stashes")
+            .find(|c| c.group == "protected stashes")
             .expect("a stash candidate")
     }
 
@@ -180,8 +227,9 @@ mod when_a_repository_has_a_stash {
     }
 
     #[test]
-    fn should_drop_it_by_name_rather_than_position() {
-        let action = the_stash().action.describe();
-        assert!(action.contains("stash@{"), "action: {action}");
+    fn should_refuse_automated_positional_deletion() {
+        assert_eq!(the_stash().eligibility, Eligibility::Protected);
+        assert!(!the_stash().selectable());
+        assert!(the_stash().detail.contains("drop manually"));
     }
 }

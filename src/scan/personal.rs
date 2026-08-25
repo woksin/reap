@@ -13,7 +13,7 @@
 
 use super::ScanOpts;
 use crate::model::{Action, Candidate, Category, Risk, ScanEvent};
-use crate::util::{age_days, path_size, tilde};
+use crate::util::{age_days, days_since, path_size, tilde};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -228,15 +228,13 @@ pub fn downloads(dir: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         .collect();
 
     entries.par_iter().for_each_with(tx.clone(), |tx, path| {
-        let Some(age) = age_days(path) else { return };
-        if age < opts.stale_days {
-            return;
-        }
-        let size = if path.is_dir() {
-            opts.cache.size_of(path)
+        let (size, age) = if path.is_dir() {
+            let (size, newest) = opts.cache.measure(path);
+            (size, newest.map(days_since))
         } else {
-            path_size(path)
+            (path_size(path), age_days(path))
         };
+        let Some(age) = age else { return };
         if size < floor {
             return;
         }
@@ -306,11 +304,11 @@ pub fn device_backups(roots: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>
         .collect();
 
     backups.par_iter().for_each_with(tx.clone(), |tx, path| {
-        let size = opts.cache.size_of(path);
+        let (size, newest) = opts.cache.measure(path);
         if size < opts.min_size {
             return;
         }
-        let age = age_days(path);
+        let age = newest.map(days_since);
         let cand = Candidate::new(
             Category::Personal,
             "device backups",

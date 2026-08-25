@@ -18,7 +18,7 @@
 //! about age is really specifying that reap looks deeper than that.
 
 use crate::config::RiskName;
-use crate::model::{Candidate, Category, Risk};
+use crate::model::{Candidate, Category, Eligibility, Risk};
 use crate::specs::given::an_agent_home::an_agent_home;
 use std::sync::LazyLock;
 
@@ -226,28 +226,23 @@ mod when_a_session_is_still_being_written_to {
     });
 
     #[test]
-    fn should_not_offer_it_at_all() {
-        // Not "offer it as irreversible" — not offer it. The directories around
-        // a running session are months old, because appending to the transcript
-        // never touched them, so a scanner reading the directory would print a
-        // row that looks exactly like the ones that are safe to act on.
-        //
-        // Counted rather than named, so this holds on a platform where the
-        // store cannot be resolved back to a project and the row carries the
-        // raw name. What is under specification is which of the two survives,
-        // not what it is called.
-        assert_eq!(
-            BECAUSE.len(),
-            1,
-            "the live session must be withheld and the finished one kept: {:?}",
-            labels(&BECAUSE)
-        );
+    fn should_catalogue_the_live_session_as_active_and_not_selectable() {
+        let live = BECAUSE
+            .iter()
+            .find(|candidate| candidate.label.contains("live-work"))
+            .expect("the active session remains visible");
+        assert_eq!(live.eligibility, Eligibility::Active);
+        assert!(!live.selectable());
     }
 
     #[test]
     #[cfg(unix)]
-    fn should_keep_the_one_that_is_finished() {
-        assert_eq!(labels(&BECAUSE), ["an agent · finished-work"]);
+    fn should_keep_the_finished_one_reclaimable() {
+        let finished = BECAUSE
+            .iter()
+            .find(|candidate| candidate.label.contains("finished-work"))
+            .expect("the finished session");
+        assert_eq!(finished.eligibility, Eligibility::Reclaimable);
     }
 }
 
@@ -263,14 +258,10 @@ mod when_a_session_ended_only_hours_ago {
     #[test]
     fn should_still_not_call_it_finished() {
         // These specifications hold nothing back — `stale_days` is zero here.
-        // The floor under a session is not the user's dial to lower: a gap of
-        // hours is a claim about when reap happened to run, not about whether
-        // anyone is coming back to that conversation.
-        assert!(
-            BECAUSE.is_empty(),
-            "offered a session that was written to hours ago: {:?}",
-            labels(&BECAUSE)
-        );
+        // The floor under a session is not the user's dial to lower.
+        let active = only(&BECAUSE);
+        assert_eq!(active.eligibility, Eligibility::Active);
+        assert!(!active.selectable());
     }
 }
 
@@ -329,16 +320,12 @@ mod when_a_configured_agent_directory_is_still_in_use {
     });
 
     #[test]
-    fn should_be_withheld_even_though_the_rule_calls_it_safe() {
+    fn should_be_visible_but_unselectable_even_though_the_rule_calls_it_safe() {
         // The dangerous combination: a rule that says safe, over a directory
-        // something is writing to. Safe is what `s` and the quick recipes take
-        // without asking, so the guard has to sit under the grading rather than
-        // beside it.
-        assert!(
-            BECAUSE.is_empty(),
-            "offered a directory in active use: {:?}",
-            labels(&BECAUSE)
-        );
+        // something is writing to. Eligibility must override that grading.
+        let active = only(&BECAUSE);
+        assert_eq!(active.eligibility, Eligibility::Active);
+        assert!(!active.selectable());
     }
 }
 
@@ -354,12 +341,18 @@ mod when_one_day_of_a_month_is_still_being_written_to {
     });
 
     #[test]
-    fn should_withhold_the_whole_month_it_belongs_to() {
-        // The row that would be ticked deletes the month, so the month is what
-        // has to be proved finished — and the proof has to reach two
-        // directories down, past the day, to the file being appended to. March
-        // is untouched by any of this and stays.
-        assert_eq!(labels(&BECAUSE), ["an agent sessions · 2026-03"]);
+    fn should_catalogue_the_whole_month_as_active() {
+        let may = BECAUSE
+            .iter()
+            .find(|candidate| candidate.label.contains("2026-05"))
+            .expect("the active month remains visible");
+        assert_eq!(may.eligibility, Eligibility::Active);
+        assert!(!may.selectable());
+        let march = BECAUSE
+            .iter()
+            .find(|candidate| candidate.label.contains("2026-03"))
+            .expect("the finished month");
+        assert_eq!(march.eligibility, Eligibility::Reclaimable);
     }
 
     #[test]

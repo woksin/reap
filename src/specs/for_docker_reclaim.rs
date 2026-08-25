@@ -48,10 +48,9 @@ mod when_reading_what_a_real_daemon_reported {
 
     #[test]
     fn should_offer_the_images_no_container_is_using() {
-        assert_eq!(
-            labels_in(&BECAUSE, "unused images"),
-            ["postgres:16", "redis:7-alpine", "node:20-alpine"]
-        );
+        let mut found = labels_in(&BECAUSE, "unused images");
+        found.sort_unstable();
+        assert_eq!(found, ["node:20-alpine", "postgres:16", "redis:7-alpine"]);
     }
 
     #[test]
@@ -217,6 +216,26 @@ mod when_docker_states_a_size_in_a_form_reap_cannot_read {
     }
 }
 
+mod when_one_unused_image_has_multiple_tags {
+    use super::*;
+
+    static BECAUSE: LazyLock<Vec<Candidate>> = LazyLock::new(|| {
+        a_docker_daemon::reporting_nothing()
+            .with_an_unused_image("same:one", "100MB", "200MB")
+            .with_an_unused_image("same:two", "100MB", "200MB")
+            .candidates()
+    });
+
+    #[test]
+    fn should_offer_the_unique_bytes_once_and_remove_every_tag() {
+        let images = in_group(&BECAUSE, "unused images");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].size, 100_000_000);
+        assert_eq!(images[0].label, "same:one (+1 tags)");
+        assert_eq!(images[0].action.describe(), "docker rmi same:one same:two");
+    }
+}
+
 mod when_a_volume_carries_no_name_of_its_own {
     use super::*;
 
@@ -349,9 +368,11 @@ mod when_there_is_no_reclaimable_build_cache {
     });
 
     #[test]
-    fn should_offer_nothing() {
-        // Every record is either in use or shared with a build that is not.
-        assert!(BECAUSE.is_empty(), "found: {:?}", labels(&BECAUSE));
+    fn should_offer_nothing_but_still_catalogue_the_active_bytes() {
+        // Every record is either in use or shared, so none is selectable. The
+        // bytes remain visible rather than disappearing from the catalogue.
+        assert!(BECAUSE.iter().all(|candidate| !candidate.selectable()));
+        assert_eq!(labels(&BECAUSE), ["BuildKit cache in use or shared"]);
     }
 }
 

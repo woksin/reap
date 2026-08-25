@@ -112,21 +112,25 @@ pub enum Setting {
     Depth,
     LibraryCacheFloor,
     DownloadsFloor,
+    Inventory,
     Docker,
     Caches,
+    Agents,
     Personal,
     Trash,
 }
 
 impl Setting {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::StaleDays,
         Self::MinSize,
         Self::Depth,
         Self::LibraryCacheFloor,
         Self::DownloadsFloor,
+        Self::Inventory,
         Self::Docker,
         Self::Caches,
+        Self::Agents,
         Self::Personal,
         Self::Trash,
     ];
@@ -138,8 +142,10 @@ impl Setting {
             Self::Depth => "descend at most",
             Self::LibraryCacheFloor => "unnamed caches over",
             Self::DownloadsFloor => "downloads over",
+            Self::Inventory => "catalog disk usage",
             Self::Docker => "scan Docker",
             Self::Caches => "scan caches",
+            Self::Agents => "scan coding agents",
             Self::Personal => "scan your own files",
             Self::Trash => "trash instead of deleting",
         }
@@ -152,8 +158,10 @@ impl Setting {
             Self::Depth => "levels below each root",
             Self::LibraryCacheFloor => "the floor for caches no rule names",
             Self::DownloadsFloor => "the floor for entries in your download directory",
+            Self::Inventory => "read-only occupied-space rows; never deletion candidates",
             Self::Docker => "images, containers, volumes, build cache",
             Self::Caches => "every [[cache]] rule, and the sweeps around them",
+            Self::Agents => "agent caches, packages, logs and session history",
             Self::Personal => "downloads, installers, device backups",
             Self::Trash => "path removals only; commands unchanged; frees nothing yet",
         }
@@ -162,7 +170,12 @@ impl Setting {
     pub const fn is_switch(self) -> bool {
         matches!(
             self,
-            Self::Docker | Self::Caches | Self::Personal | Self::Trash
+            Self::Inventory
+                | Self::Docker
+                | Self::Caches
+                | Self::Agents
+                | Self::Personal
+                | Self::Trash
         )
     }
 
@@ -179,8 +192,10 @@ impl Setting {
             Self::Depth => number(scan.depth.map(|v| v.to_string()), "8"),
             Self::LibraryCacheFloor => number(scan.library_cache_floor.clone(), "200MB"),
             Self::DownloadsFloor => number(scan.downloads_floor.clone(), "100MB"),
+            Self::Inventory => switch(scan.inventory, true),
             Self::Docker => switch(scan.docker, true),
             Self::Caches => switch(scan.caches, true),
+            Self::Agents => switch(scan.agents, true),
             Self::Personal => switch(scan.personal, true),
             Self::Trash => switch(scan.trash, false),
         }
@@ -189,8 +204,10 @@ impl Setting {
     /// True when a switch is on, whether by choice or by default.
     pub fn is_on(self, cfg: &Config) -> bool {
         match self {
+            Self::Inventory => cfg.scan.inventory.unwrap_or(true),
             Self::Docker => cfg.scan.docker.unwrap_or(true),
             Self::Caches => cfg.scan.caches.unwrap_or(true),
+            Self::Agents => cfg.scan.agents.unwrap_or(true),
             Self::Personal => cfg.scan.personal.unwrap_or(true),
             Self::Trash => cfg.scan.trash.unwrap_or(false),
             _ => true,
@@ -694,8 +711,10 @@ impl Settings {
         }
         let now = !setting.is_on(cfg);
         match setting {
+            Setting::Inventory => cfg.scan.inventory = Some(now),
             Setting::Docker => cfg.scan.docker = Some(now),
             Setting::Caches => cfg.scan.caches = Some(now),
+            Setting::Agents => cfg.scan.agents = Some(now),
             Setting::Personal => cfg.scan.personal = Some(now),
             Setting::Trash => cfg.scan.trash = Some(now),
             _ => return None,

@@ -1,5 +1,5 @@
 use crate::app::{App, Focus, Mode, Node};
-use crate::model::{Category, Risk};
+use crate::model::{Category, Eligibility, Risk};
 use crate::util::{human, human_age, rows};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -28,6 +28,7 @@ const fn risk_color(risk: Risk) -> Color {
 
 const fn category_color(cat: Category) -> Color {
     match cat {
+        Category::Storage => Color::Rgb(160, 170, 185),
         Category::Git => Color::Rgb(244, 143, 177),
         Category::Artifacts => Color::Rgb(129, 199, 245),
         Category::Docker => Color::Rgb(126, 231, 219),
@@ -131,6 +132,10 @@ pub fn render(f: &mut Frame<'_>, app: &App, tick: u64) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the two-line header is one responsive layout assembled from several optional summaries"
+)]
 fn render_header(f: &mut Frame<'_>, app: &App, area: Rect, tick: u64) {
     // A bordered block's usable width is two columns narrower than its area.
     let inner = area.width.saturating_sub(2) as usize;
@@ -174,7 +179,12 @@ fn render_header(f: &mut Frame<'_>, app: &App, area: Rect, tick: u64) {
             human(app.total_size()),
             Style::new().fg(SAFE).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" reclaimable ", Style::new().fg(DIM)),
+        Span::styled(" reclaimable · ", Style::new().fg(DIM)),
+        Span::styled(
+            human(app.inventory_size()),
+            Style::new().fg(Color::Rgb(200, 205, 215)),
+        ),
+        Span::styled(" catalogued ", Style::new().fg(DIM)),
     ];
 
     // Second line: how the total splits by risk, and what it would do to the
@@ -201,17 +211,45 @@ fn render_header(f: &mut Frame<'_>, app: &App, area: Rect, tick: u64) {
         ));
     }
 
+    if app.recent_size() > 0 {
+        split.push(Span::styled("○ ", Style::new().fg(DIM)));
+        split.push(Span::styled(
+            human(app.recent_size()),
+            Style::new().fg(Color::Rgb(200, 205, 215)),
+        ));
+        split.push(Span::styled(" recent   ", Style::new().fg(DIM)));
+    }
+    if let Some(unclassified) = app.unclassified_size().filter(|size| *size > 0) {
+        split.push(Span::styled(
+            human(unclassified),
+            Style::new().fg(Color::Rgb(200, 205, 215)),
+        ));
+        split.push(Span::styled(
+            " system/unclassified   ",
+            Style::new().fg(DIM),
+        ));
+    }
+
     let disk = match app.disk {
-        Some((free, total)) => vec![
+        Some((free, total)) if app.projection_safe => vec![
             Span::styled(human(free), Style::new().fg(Color::Rgb(200, 205, 215))),
             Span::styled(" free of ", Style::new().fg(DIM)),
             Span::styled(human(total), Style::new().fg(DIM)),
-            Span::styled(" → ", Style::new().fg(DIM)),
+            Span::styled(" ≈ ", Style::new().fg(DIM)),
             Span::styled(
                 human(free + app.total_size()),
                 Style::new().fg(SAFE).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
+        ],
+        Some((free, total)) => vec![
+            Span::styled(human(free), Style::new().fg(Color::Rgb(200, 205, 215))),
+            Span::styled(" free of ", Style::new().fg(DIM)),
+            Span::styled(human(total), Style::new().fg(DIM)),
+            Span::styled(
+                " · unassigned or multiple storage pools ",
+                Style::new().fg(CAUTION),
+            ),
         ],
         None => vec![],
     };
@@ -331,7 +369,7 @@ fn group_row(app: &App, cat: Category, group: &str, width: usize) -> ListItem<'s
 fn render_sidebar(f: &mut Frame<'_>, app: &App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
     let width = area.width.saturating_sub(2) as usize;
-    let total = app.total_size().max(1);
+    let total = app.inventory_size().max(app.total_size()).max(1);
 
     let rows: Vec<ListItem<'static>> = app
         .nodes
@@ -354,6 +392,10 @@ fn render_sidebar(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "item marks, eligibility, command preview and narrow-terminal layout form one row renderer"
+)]
 fn render_items(f: &mut Frame<'_>, app: &App, area: Rect) {
     let focused = app.focus == Focus::Items;
     let width = area.width.saturating_sub(2) as usize;
@@ -398,8 +440,10 @@ fn render_items(f: &mut Frame<'_>, app: &App, area: Rect) {
             let item = &app.items[i];
             let (mark, mark_style) = if item.selected {
                 ("◉", Style::new().fg(SELECTED).add_modifier(Modifier::BOLD))
-            } else {
+            } else if item.selectable() {
                 ("○", Style::new().fg(DIM))
+            } else {
+                ("·", Style::new().fg(DIM))
             };
 
             let size = if item.size == 0 {
@@ -423,12 +467,23 @@ fn render_items(f: &mut Frame<'_>, app: &App, area: Rect) {
                     Span::styled(format!("{age:>6}  "), Style::new().fg(DIM)),
                     Span::styled(
                         format!("{size:>9}"),
-                        Style::new().fg(if item.size == 0 { DIM } else { SAFE }),
+                        Style::new().fg(if item.size == 0 || !item.selectable() {
+                            DIM
+                        } else {
+                            SAFE
+                        }),
                     ),
-                    Span::styled(
-                        format!("  {} ", item.risk.dot()),
-                        Style::new().fg(risk_color(item.risk)),
-                    ),
+                    if item.eligibility == Eligibility::Reclaimable {
+                        Span::styled(
+                            format!("  {} ", item.risk.dot()),
+                            Style::new().fg(risk_color(item.risk)),
+                        )
+                    } else {
+                        Span::styled(
+                            format!("  {} ", item.eligibility.label()),
+                            Style::new().fg(DIM),
+                        )
+                    },
                 ],
                 width,
             );
@@ -436,7 +491,7 @@ fn render_items(f: &mut Frame<'_>, app: &App, area: Rect) {
             // Show the exact command on the highlighted row, so nothing is
             // confirmed without its consequence being visible first.
             let highlighted = app.visible.get(app.item_idx) == Some(&i);
-            let detail = if highlighted {
+            let detail = if highlighted && item.selectable() {
                 Line::from(vec![
                     Span::styled("   $ ", Style::new().fg(ACCENT)),
                     Span::styled(
@@ -563,7 +618,7 @@ fn risk_breakdown(app: &App) -> Vec<Line<'static>> {
         if matching.is_empty() {
             continue;
         }
-        let size: u64 = matching.iter().map(|i| i.size).sum();
+        let size = app.selected_risk_size(risk);
         lines.push(Line::from(vec![
             Span::styled(
                 format!("    {} ", risk.dot()),
@@ -614,15 +669,22 @@ fn render_confirm(f: &mut Frame<'_>, app: &App) {
 
     if let Some((free, _)) = app.disk {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("    free space  ", Style::new().fg(DIM)),
-            Span::styled(human(free), Style::new().fg(Color::Rgb(200, 205, 215))),
-            Span::styled("  →  ", Style::new().fg(DIM)),
-            Span::styled(
-                human(free + app.selected_size()),
-                Style::new().fg(SAFE).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        if app.selected_projection_safe() {
+            lines.push(Line::from(vec![
+                Span::styled("    free space  ", Style::new().fg(DIM)),
+                Span::styled(human(free), Style::new().fg(Color::Rgb(200, 205, 215))),
+                Span::styled("  ≈  ", Style::new().fg(DIM)),
+                Span::styled(
+                    human(free + app.selected_size()),
+                    Style::new().fg(SAFE).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "    free-space projection unavailable for unassigned or multiple pools",
+                Style::new().fg(CAUTION),
+            )));
+        }
     }
 
     lines.push(Line::from(""));

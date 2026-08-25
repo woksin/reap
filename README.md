@@ -157,6 +157,7 @@ reap --trash              # move paths to the Trash instead of deleting them
 reap -p ~/work -p ~/oss   # scan specific directories
 reap --stale-days 90      # require 90 days where an age can be measured
 reap --min-size 100MB     # hide the small fry
+reap --no-inventory       # skip the read-only occupied-space catalogue
 reap --no-docker          # skip the Docker scan
 reap --no-agents          # skip agent caches, packages and session history
 reap --no-personal        # skip downloads, installers and device backups
@@ -167,7 +168,10 @@ reap --write-config       # write a documented starter config
 
 With no `--path`, reap looks in the usual places under `$HOME`: `repos`, `src`,
 `Developer`, `Projects`, `code`, `dev`, `work`, `git`, and the two the Windows tooling
-picks by default — `source/repos` and `Documents/GitHub`.
+picks by default — `source/repos` and `Documents/GitHub`. It also probes those exact
+names and direct child Git checkouts below local mounted volumes, such as
+`/Volumes/sourcecode/repos` and `/Volumes/sourcecode/reap`; it does not recursively walk
+`/Volumes`, network mounts, or arbitrary external-drive contents.
 
 Once you are in, `/` narrows the list as you type — across every category at once, so one
 query reaches docker's build cache and a package manager's on the same screen:
@@ -279,8 +283,14 @@ repositories with real remotes, and every verdict reached the way it would be on
 > themselves. A failed patch or remote-safety check never produces a safe verdict; when
 > reap cannot prove recoverability, it grades the branch irreversible.
 
-Worktrees are judged on both axes that lose work: uncommitted or ignored files, and commits
-no remote can reach. One is only called safe to prune when all are absent.
+Worktrees are judged by what `git worktree remove` actually destroys. An attached branch
+survives removal, so commits on that branch remain reachable even when they were never
+pushed. A detached HEAD must be named by another ref or it is irreversible. Modified and
+untracked files are irreversible; ignored paths recognised as generated build output are
+rebuildable, while unknown ignored paths such as `.env` remain irreversible. Locked
+worktrees are catalogued as protected. Immediately before removal reap checks HEAD and the
+full status again; for a rebuildable detached HEAD it also proves a containing ref still
+exists. Any changed premise aborts the removal and requires a rescan.
 
 ## What else it finds
 
@@ -408,8 +418,8 @@ History is offered one project — or one month — at a time, never as a single
 all-or-nothing lump, because "do I still want my history" has no answer and "do I still
 need the history of *that*" does.
 
-**Nothing here is offered until it is provably finished**, and finished is measured from
-the newest file anywhere inside a store rather than from the store's own timestamp. The
+**Nothing here is selectable until it is provably finished**, and finished is measured
+from the newest file anywhere inside a store rather than from the store's own timestamp. The
 distinction is not academic. A directory's mtime moves when an entry is added and *not*
 when one is written to, and a transcript is a file that gets appended to for as long as
 the session lasts — so a conversation running right now, or a month-old one resumed this
@@ -421,12 +431,12 @@ Aug 24 22:17:25          # the directory
 Aug 24 22:39:39          # the transcript inside it, still being written
 ```
 
-Reading the first number offers a live session as idle. reap reads the second, and a
-store touched within the last **24 hours is never offered at all** — the one threshold
-here that `--stale-days 0` cannot lower, because a gap of hours is a claim about when
-reap happened to run rather than about whether anyone is coming back to that
-conversation. The same rule covers the safe tier, so a running background job protects
-its own log.
+Reading the first number offers a live session as idle. reap reads the second. A store
+touched within the last **24 hours remains visible as active but has no selectable
+action** — the one threshold here that `--stale-days 0` cannot lower, because a gap of
+hours is a claim about when reap happened to run rather than about whether anyone is
+coming back to that conversation. The same rule covers the safe tier, so a running
+background job protects its own log while still explaining its bytes.
 
 Where a tool names its store after the project's path with the separators flattened
 (`-Volumes-sourcecode-reap`), reap resolves it back to a real directory. A dash is a legal
@@ -482,10 +492,10 @@ Device backups get the same treatment, and are named after the device rather tha
 identifier — `Sara's iPhone`, not `00008030-001C4D...` — because the question you are
 actually being asked is whether you still have that phone.
 
-Only the top level of the download directory, only what is older than `stale_days`, and
-only what is over `downloads_floor` (100 MB by default): every row here costs a judgement
-someone has to make one at a time, so a list long enough to skim past is a list that gets
-skipped whole.
+Only the top level of the download directory and only what is over `downloads_floor`
+(100 MB by default). Entries younger than `stale_days` remain visible as recent but are
+not selectable: every actionable row here costs a judgement someone has to make one at a
+time, so a list long enough to skim past is a list that gets skipped whole.
 
 `--no-personal`, or `personal = false` under `[scan]`, turns the whole category off.
 
@@ -522,8 +532,12 @@ Beyond that:
   once per checkout.
 - `git gc` runs **without** `--prune=now`. reap also deletes branches, and pruning
   immediately would throw away the reflog that makes those recoverable.
-- **Stashes are dropped highest-index-first**, because dropping `stash@{0}` renumbers
-  everything below it.
+- Branch deletion pins the scanned OID and the exact ref/tip supporting its recoverability
+  grade. After rechecking the proof, one `git update-ref` transaction verifies that proof
+  ref and expected branch OID while deleting, so neither can move through a stale row.
+- Stashes remain visible but **protected/manual**. Git identifies them by mutable reflog
+  positions and exposes no atomic compare-and-drop operation for an arbitrary entry, so
+  reap refuses to risk deleting a different stash after concurrent activity.
 - Overlapping selections are removed **shallowest-first**, and anything already taken by a
   parent is skipped rather than counted twice.
 - A **locked** git worktree is never offered.
@@ -711,11 +725,18 @@ being a component of its own.
 
 ### Coverage boundaries
 
-reap is a curated scanner, not a whole-disk indexer. With no `--path`, repository and
-artifact discovery starts only in the conventional roots listed under [Use](#use), and
+reap has two deliberately separate layers. **Disk usage** is a read-only, coarse catalogue
+of host-allocated bytes under the home directory, conventional source roots, mounted local
+source volumes, and several platform data roots. **Reclaim findings** remain curated and
+carry the evidence and action required to remove something safely. Ordinary source,
+application state and unknown data can therefore explain the disk without acquiring a
+delete button.
+
+Repository and artifact discovery starts in the conventional roots listed under
+[Use](#use), including conventional directories directly below local mounted volumes, and
 stops at the configured depth. It recognizes bare repositories, linked worktrees,
 submodules and nested or hidden checkouts that fall within those roots, but does not cross
-symlinked directories or directories it cannot read.
+symlinked directories, network mounts, or directories it cannot read.
 
 Artifact and cache detection comes from finite rule tables plus the configurable unnamed
 cache sweep. New toolchains, renamed vendor directories, network storage, cloud-only data,
@@ -723,11 +744,12 @@ arbitrary temporary folders and files outside those roots are not automatically 
 Docker findings come from the Docker CLI's current context and the builder/system view it
 reports; Podman, containerd and other runtimes are outside this scanner.
 
-`stale_days` is enforced whenever a scanner has a meaningful age. Some objects, notably
-Docker volumes and dangling networks, do not expose one in the data reap reads; they stay
-visible so “unknown age” is not quietly treated as “recent.” Permissions, unavailable Git
-remotes and absent tools can also limit what can be verified, so review the displayed
-evidence before deletion—especially anything irreversible.
+`stale_days` controls **eligibility**, not visibility. Recognised bytes below the threshold
+remain visible as `recent` but cannot be selected. Active and protected rows work the same
+way. Some objects, notably Docker volumes and dangling networks, do not expose an age in
+the data reap reads; they remain eligible with unknown age rather than being quietly
+called recent. Permissions, unavailable Git remotes and absent tools are surfaced as
+coverage/protected rows instead of silently contributing zero.
 
 ## Keys
 
@@ -761,21 +783,19 @@ is already narrowed to it.
 
 ## Reading the numbers
 
-The header carries the three figures worth knowing at a glance:
+The header separates **catalogued usage**, **recent recognised data**, and **reclaimable
+bytes**. The risk split applies only to selectable reclaim findings. `system/unclassified`
+is the storage pool's occupied bytes not accounted for by readable inventory rows; APFS
+snapshots, protected system data, permissions and catalogue floors can all contribute.
 
-```
-│ reap  914 items found                                                          77.8 GB reclaimable │
-│ ● 18.5 GB safe   ● 56.8 GB rebuildable   ▲ 2.56 GB irreversible     164 GB free of 494 GB → 242 GB │
-```
+Nested opportunities are assigned once. A worktree containing `node_modules`, `bin` and
+`obj` no longer promises the whole worktree plus all three children. Selection totals use
+the union of affected paths, including command actions such as `git worktree remove`.
 
-The **risk split** answers "how much can I get back without thinking" — 18.5 GB here, no
-judgement required. The **disk line** projects where free space lands if you take
-everything; the confirm dialog narrows that to your actual selection.
-
-The tree opens on **Everything**, one cross-category list sorted biggest-first, so the
-largest wins are visible without picking a category. The highlighted row swaps its
-description for the **exact command that will run**, so nothing is confirmed without its
-consequence visible.
+The tree opens on **Everything**, one cross-category list sorted biggest-first. A
+highlighted selectable row swaps its description for the **exact command that will run**;
+usage, recent, active and protected rows keep their explanation because they have no
+action.
 
 ### Sizes
 
@@ -783,12 +803,19 @@ Sizes are **SI** — 1 GB is 1000³ bytes — matching macOS and `docker system 
 can be compared against those directly. This differs from `du -h`, which is 1024-based and
 reads about 7% smaller for the same bytes.
 
-Directory sizes are the sum of file lengths, not allocated blocks.
+Reclaim findings use logical file lengths because that is the portable estimate associated
+with deleting a path. Read-only inventory uses allocated blocks, so a sparse 1 TB
+`Docker.raw` is shown as the tens of gigabytes it occupies rather than as a terabyte.
+Docker daemon figures remain logical estimates supplied by Docker; its host backing-store
+row explicitly links to them and the two totals must not be added. Docker Desktop may also
+compact sparse storage later rather than returning every logical byte immediately.
 
-The disk figure comes from the volume reap was launched in, and the projection adds the
-whole reclaimable total to it. That is right when everything found lives in one free-space
-pool — including several APFS volumes in a shared container, which report a common figure.
-It overstates the gain if your scan roots sit on a genuinely separate disk.
+The interactive disk projection is shown only when every non-empty selectable finding has
+a host path in the current stable storage-pool identity. A different filesystem, unreadable
+path, or pathless logical resource such as Docker suppresses the combined projection. The
+system/unclassified remainder is likewise shown only when every catalogued local mount is
+in one pool. JSON attributes each candidate from its actual footprint, emits per-filesystem
+projections, and keeps pathless logical resources in a separate total.
 
 ## Performance
 

@@ -1,10 +1,12 @@
-use crate::model::{Action, Candidate, ReapEvent};
+use crate::model::{Action, BranchProof, Candidate, ReapEvent};
 use crate::scan::home_dir;
 use crate::trash;
 use rayon::prelude::*;
 use std::cmp::Reverse;
+use std::fmt::Write as FmtWrite;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -138,7 +140,10 @@ fn stash_index(args: &[String]) -> Option<u64> {
 fn command_order(action: &Action) -> Reverse<u64> {
     match action {
         Action::Run { args, .. } => Reverse(stash_index(args).unwrap_or(0)),
-        Action::Remove(_) => Reverse(0),
+        Action::None
+        | Action::Remove(_)
+        | Action::GitBranchDelete { .. }
+        | Action::GitWorktreeRemove { .. } => Reverse(0),
     }
 }
 
@@ -151,7 +156,10 @@ fn command_order(action: &Action) -> Reverse<u64> {
 fn partition_removals(mut removals: Vec<Candidate>) -> (Vec<Candidate>, Vec<Candidate>) {
     removals.sort_by_key(|c| match &c.action {
         Action::Remove(p) => p.components().count(),
-        Action::Run { .. } => 0,
+        Action::None
+        | Action::GitBranchDelete { .. }
+        | Action::GitWorktreeRemove { .. }
+        | Action::Run { .. } => 0,
     });
 
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -174,7 +182,40 @@ fn partition_removals(mut removals: Vec<Candidate>) -> (Vec<Candidate>, Vec<Cand
 
 /// Run every candidate, reporting each through `emit` as it finishes.
 pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sync + Send) {
-    let (removals, mut commands): (Vec<_>, Vec<_>) = items
+    // Command actions can remove filesystem trees too (`git worktree remove`).
+    // Resolve those footprints before splitting commands from path removals, or
+    // a selected worktree and its selected node_modules are counted and acted
+    // on twice.
+    let mut ordered = items;
+    ordered.sort_by_key(|candidate| {
+        candidate
+            .footprint
+            .as_deref()
+            .map_or(usize::MAX, |path| path.components().count())
+    });
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut actionable = Vec::new();
+    let mut covered = Vec::new();
+    for candidate in ordered {
+        if matches!(candidate.action, Action::None) {
+            covered.push(candidate);
+            continue;
+        }
+        if candidate
+            .footprint
+            .as_deref()
+            .is_some_and(|path| roots.iter().any(|root| path.starts_with(root)))
+        {
+            covered.push(candidate);
+        } else {
+            if let Some(path) = &candidate.footprint {
+                roots.push(path.clone());
+            }
+            actionable.push(candidate);
+        }
+    }
+
+    let (removals, mut commands): (Vec<_>, Vec<_>) = actionable
         .into_iter()
         .partition(|c| matches!(c.action, Action::Remove(_)));
 
@@ -185,7 +226,7 @@ pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sy
         emit(report_for(&cand, execute(&cand.action, opts)));
     }
 
-    let (independent, covered) = partition_removals(removals);
+    let (independent, nested_removals) = partition_removals(removals);
 
     // Disjoint directory trees, so unlinking them concurrently is safe and
     // considerably faster when there are hundreds of thousands of inodes.
@@ -193,7 +234,7 @@ pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sy
         emit(report_for(cand, execute(&cand.action, opts)));
     });
 
-    for cand in covered {
+    for cand in covered.into_iter().chain(nested_removals) {
         emit(report_for(&cand, Outcome::Skipped));
     }
 }
@@ -231,8 +272,130 @@ pub fn spawn(items: Vec<Candidate>, opts: ReapOpts, tx: Sender<ReapEvent>) {
     });
 }
 
+fn git_output(repo: &Path, args: &[&str]) -> Option<std::process::Output> {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()
+}
+
+fn branch_proof_holds(repo: &Path, oid: &str, proof: &BranchProof) -> bool {
+    match proof {
+        BranchProof::ContainsRef { reference, .. } => {
+            git_output(repo, &["merge-base", "--is-ancestor", oid, reference])
+                .is_some_and(|output| output.status.success())
+        }
+        BranchProof::PatchesIn { reference, .. } => {
+            let range = format!("{reference}..{oid}");
+            let linear = git_output(repo, &["rev-list", "--count", "--merges", &range])
+                .filter(|output| output.status.success())
+                .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "0");
+            let patches = git_output(repo, &["cherry", reference, oid])
+                .filter(|output| output.status.success())
+                .is_some_and(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+                    let saw_any = lines.clone().next().is_some();
+                    saw_any && lines.all(|line| line.trim().starts_with('-'))
+                });
+            linear && patches
+        }
+        BranchProof::None => true,
+    }
+}
+
+fn execute_branch_delete(
+    repo: &Path,
+    branch: &str,
+    expected_oid: &str,
+    proof: &BranchProof,
+    opts: ReapOpts,
+) -> Outcome {
+    let full_ref = format!("refs/heads/{branch}");
+    let Some(current) = git_output(repo, &["rev-parse", "--verify", &full_ref]) else {
+        return Outcome::Failed("could not recheck branch identity".into());
+    };
+    if !current.status.success() || String::from_utf8_lossy(&current.stdout).trim() != expected_oid
+    {
+        return Outcome::Failed("branch changed after the scan; rescan required".into());
+    }
+    if !branch_proof_holds(repo, expected_oid, proof) {
+        return Outcome::Failed(
+            "branch recoverability proof changed after the scan; rescan required".into(),
+        );
+    }
+    if opts.dry_run {
+        return Outcome::Done;
+    }
+
+    // Verify the proof-bearing ref and delete the branch under one ref
+    // transaction. Neither the branch nor the ref that justifies its risk grade
+    // can move between proof and deletion.
+    let mut transaction = String::from("start\n");
+    match proof {
+        BranchProof::ContainsRef {
+            reference,
+            expected_tip,
+        }
+        | BranchProof::PatchesIn {
+            reference,
+            expected_tip,
+        } => {
+            let _ = writeln!(transaction, "verify {reference} {expected_tip}");
+        }
+        BranchProof::None => {}
+    }
+    let _ = write!(
+        transaction,
+        "delete {full_ref} {expected_oid}\nprepare\ncommit\n"
+    );
+    let child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["update-ref", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else {
+        return Outcome::Failed("could not start atomic branch transaction".into());
+    };
+    let wrote = child
+        .stdin
+        .as_mut()
+        .is_some_and(|stdin| stdin.write_all(transaction.as_bytes()).is_ok());
+    if !wrote {
+        return Outcome::Failed("could not write atomic branch transaction".into());
+    }
+    let deleted = child.wait_with_output();
+    let Ok(deleted) = deleted else {
+        return Outcome::Failed("could not finish atomic branch transaction".into());
+    };
+    if !deleted.status.success() {
+        return Outcome::Failed(
+            String::from_utf8_lossy(&deleted.stderr)
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("branch or recoverability ref changed during deletion")
+                .to_string(),
+        );
+    }
+    // Match `git branch -d/-D` housekeeping. Failure only leaves harmless
+    // branch-specific configuration; the ref deletion itself already succeeded.
+    let section = format!("branch.{branch}");
+    let _ = git_output(repo, &["config", "--remove-section", &section]);
+    Outcome::Done
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the action dispatcher keeps every destructive path behind one audited safety boundary"
+)]
 fn execute(action: &Action, opts: ReapOpts) -> Outcome {
     match action {
+        Action::None => Outcome::Failed("item is informational and cannot be reaped".into()),
         Action::Remove(path) => {
             if is_forbidden(path) {
                 return Outcome::Failed("refused: path is too broad to delete".into());
@@ -258,6 +421,134 @@ fn execute(action: &Action, opts: ReapOpts) -> Outcome {
                     Ok(()) => Outcome::Done,
                     Err(e) => Outcome::Failed(e.to_string()),
                 },
+            }
+        }
+        Action::GitBranchDelete {
+            repo,
+            branch,
+            expected_oid,
+            proof,
+            ..
+        } => execute_branch_delete(repo, branch, expected_oid, proof, opts),
+        Action::GitWorktreeRemove {
+            repo,
+            path,
+            expected_head,
+            expected_status,
+            require_surviving_ref,
+            force,
+        } => {
+            if !path.exists() {
+                return Outcome::Skipped;
+            }
+            #[cfg(not(windows))]
+            {
+                // A final, bounded activity check. `+d` examines only this
+                // directory rather than recursively walking a potentially huge
+                // worktree; agent processes normally keep the worktree root as
+                // their cwd. Absence of lsof is not treated as proof either way,
+                // so HEAD/status revalidation still remains the hard guard.
+                if let Ok(output) = Command::new("lsof")
+                    .args(["-n", "-P", "-a", "-d", "cwd", "+d"])
+                    .arg(path)
+                    .output()
+                    && output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .nth(1)
+                        .is_some()
+                {
+                    return Outcome::Failed(
+                        "a running process is using this worktree; try again after it exits".into(),
+                    );
+                }
+            }
+            let inspect = |args: &[&str]| -> Result<String, String> {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(path)
+                    .args(args)
+                    .output()
+                    .map_err(|error| error.to_string())?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+                }
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            };
+            let current_head = match inspect(&["rev-parse", "HEAD"]) {
+                Ok(head) => head.trim().to_string(),
+                Err(error) => return Outcome::Failed(format!("could not recheck HEAD: {error}")),
+            };
+            if &current_head != expected_head {
+                return Outcome::Failed(
+                    "worktree HEAD changed after the scan; rescan required".into(),
+                );
+            }
+            let current_status = match inspect(&[
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ]) {
+                Ok(status) => status,
+                Err(error) => return Outcome::Failed(format!("could not recheck files: {error}")),
+            };
+            if &current_status != expected_status {
+                return Outcome::Failed(
+                    "worktree files changed after the scan; rescan required".into(),
+                );
+            }
+            // Keep this immediately before the destructive command. A status
+            // walk can take long enough for another process to move a ref.
+            if *require_surviving_ref {
+                let refs = Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args([
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "--contains",
+                        &current_head,
+                    ])
+                    .output();
+                match refs {
+                    Ok(output)
+                        if output.status.success()
+                            && String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .any(|line| !line.trim().is_empty()) => {}
+                    Ok(_) => {
+                        return Outcome::Failed(
+                            "the ref that made detached HEAD recoverable no longer contains it; rescan required"
+                                .into(),
+                        );
+                    }
+                    Err(error) => {
+                        return Outcome::Failed(format!(
+                            "could not recheck detached HEAD reachability: {error}"
+                        ));
+                    }
+                }
+            }
+            if opts.dry_run {
+                return Outcome::Done;
+            }
+            let mut command = Command::new("git");
+            command.arg("-C").arg(repo).args(["worktree", "remove"]);
+            if *force {
+                command.arg("--force");
+            }
+            command.arg(path);
+            match command.output() {
+                Ok(output) if output.status.success() => Outcome::Done,
+                Ok(output) => Outcome::Failed(
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("git worktree remove failed")
+                        .to_string(),
+                ),
+                Err(error) => Outcome::Failed(error.to_string()),
             }
         }
         Action::Run { program, args, cwd } => {
@@ -625,16 +916,223 @@ mod tests {
             "stale worktrees",
             "worktree",
             "",
-            0,
+            100,
             Risk::Caution,
             Action::Run {
                 program: "true".into(),
                 args: vec![],
                 cwd: None,
             },
-        );
-        let out = run(vec![candidate("nested", 0, &nested), wt], plain(true));
+        )
+        .with_footprint(root.join("wt"));
+        let out = run(vec![candidate("nested", 50, &nested), wt], plain(true));
         assert_eq!(out[0].label, "worktree");
+        assert_eq!(out.iter().map(|report| report.freed).sum::<u64>(), 100);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn branch_and_recoverability_ref_are_verified_in_one_delete_transaction() {
+        let repo = tmp("branch-proof-transaction");
+        let run_git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=Spec", "-c", "user.email=spec@example.com"])
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        run_git(&["add", "base.txt"]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "feature\n").unwrap();
+        run_git(&["add", "feature.txt"]);
+        run_git(&["commit", "-q", "-m", "feature"]);
+        let branch_oid = run_git(&["rev-parse", "feature"]).trim().to_string();
+        run_git(&["checkout", "-q", "main"]);
+        run_git(&["merge", "-q", "--no-ff", "-m", "merge feature", "feature"]);
+        let main_oid = run_git(&["rev-parse", "main"]).trim().to_string();
+
+        let outcome = execute(
+            &Action::GitBranchDelete {
+                repo: repo.clone(),
+                branch: "feature".into(),
+                expected_oid: branch_oid,
+                proof: BranchProof::ContainsRef {
+                    reference: "refs/heads/main".into(),
+                    expected_tip: main_oid,
+                },
+                force: false,
+            },
+            plain(false),
+        );
+        assert!(matches!(outcome, Outcome::Done));
+        let deleted = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "--verify", "refs/heads/feature"])
+            .output()
+            .unwrap();
+        assert!(!deleted.status.success());
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn branch_deletion_aborts_if_the_branch_advanced_after_the_scan() {
+        let repo = tmp("branch-race");
+        let run_git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=Spec", "-c", "user.email=spec@example.com"])
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        run_git(&["add", "base.txt"]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("feature.txt"), "one\n").unwrap();
+        run_git(&["add", "feature.txt"]);
+        run_git(&["commit", "-q", "-m", "feature one"]);
+        let scanned = run_git(&["rev-parse", "feature"]).trim().to_string();
+        std::fs::write(repo.join("feature.txt"), "two\n").unwrap();
+        run_git(&["add", "feature.txt"]);
+        run_git(&["commit", "-q", "-m", "feature two"]);
+        let advanced = run_git(&["rev-parse", "feature"]).trim().to_string();
+        run_git(&["checkout", "-q", "main"]);
+
+        let outcome = execute(
+            &Action::GitBranchDelete {
+                repo: repo.clone(),
+                branch: "feature".into(),
+                expected_oid: scanned,
+                proof: BranchProof::None,
+                force: true,
+            },
+            plain(false),
+        );
+        assert!(matches!(outcome, Outcome::Failed(_)));
+        assert_eq!(run_git(&["rev-parse", "feature"]).trim(), advanced);
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn detached_worktree_removal_rechecks_the_ref_that_made_it_recoverable() {
+        let repo = tmp("detached-ref-race");
+        let worktree = repo.with_extension("detached");
+        let run_git = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=Spec", "-c", "user.email=spec@example.com"])
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        run_git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("tracked.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-q", "-m", "initial"]);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let head = run_git(&worktree, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        run_git(&repo, &["update-ref", "-d", "refs/heads/master"]);
+        run_git(&repo, &["update-ref", "-d", "refs/heads/main"]);
+
+        let outcome = execute(
+            &Action::GitWorktreeRemove {
+                repo: repo.clone(),
+                path: worktree.clone(),
+                expected_head: head,
+                expected_status: String::new(),
+                require_surviving_ref: true,
+                force: false,
+            },
+            plain(false),
+        );
+        assert!(matches!(outcome, Outcome::Failed(_)));
+        assert!(worktree.exists());
+        std::fs::remove_dir_all(&worktree).ok();
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn worktree_removal_aborts_if_files_changed_after_the_scan() {
+        let repo = tmp("worktree-race");
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=Spec", "-c", "user.email=spec@example.com"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        run_git(&["init", "-q"]);
+        std::fs::write(repo.join("tracked.txt"), "one\n").unwrap();
+        run_git(&["add", "tracked.txt"]);
+        run_git(&["commit", "-q", "-m", "initial"]);
+        let head = String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        std::fs::write(repo.join("tracked.txt"), "changed after scan\n").unwrap();
+
+        let outcome = execute(
+            &Action::GitWorktreeRemove {
+                repo: repo.clone(),
+                path: repo.clone(),
+                expected_head: head,
+                expected_status: String::new(),
+                require_surviving_ref: false,
+                force: true,
+            },
+            plain(false),
+        );
+        assert!(matches!(outcome, Outcome::Failed(_)));
+        assert!(repo.exists());
+        std::fs::remove_dir_all(repo).ok();
     }
 }

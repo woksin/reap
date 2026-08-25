@@ -11,7 +11,7 @@
 //! wrong in the safe direction wastes disk. Getting it wrong in the other
 //! direction destroys something that existed in one place.
 
-use crate::model::{Candidate, Risk};
+use crate::model::{Candidate, Eligibility, Risk};
 use crate::specs::given::a_download_directory::{a_backup_directory, a_download_directory};
 use std::sync::LazyLock;
 
@@ -118,9 +118,15 @@ mod when_a_download_is_recent {
     });
 
     #[test]
-    fn should_leave_it_alone_until_it_has_been_forgotten() {
-        // Something downloaded on Tuesday is being used on Wednesday.
-        assert_eq!(labels(&BECAUSE), ["forgotten.dmg"]);
+    fn should_show_it_as_recent_without_making_it_selectable() {
+        // Something downloaded on Tuesday still explains occupied bytes on
+        // Wednesday, but it is not a deletion candidate.
+        let mut found = labels(&BECAUSE);
+        found.sort();
+        assert_eq!(found, ["forgotten.dmg", "just-downloaded.dmg"]);
+        let recent = find(&BECAUSE, "just-downloaded.dmg");
+        assert_eq!(recent.eligibility, Eligibility::Recent);
+        assert!(!recent.selectable());
     }
 }
 

@@ -131,7 +131,8 @@ impl a_repository {
         self
     }
 
-    /// A worktree holding a commit no remote can reach.
+    /// A worktree holding a commit no remote can reach. The attached branch
+    /// still keeps it reachable after the checkout is removed.
     pub fn with_a_worktree_holding_unpushed_work(self, name: &str) -> Self {
         let this = self.with_a_worktree(name);
         let path = this.dir.path.join(name);
@@ -139,6 +140,34 @@ impl a_repository {
         git(&path, &["add", "wip.txt"]);
         git(&path, &["commit", "-m", "wip"]);
         this
+    }
+
+    /// A detached worktree whose HEAD is not named by any surviving ref.
+    pub fn with_a_detached_worktree_holding_unique_commit(self, name: &str) -> Self {
+        let path = self.dir.path.join(name);
+        git(
+            &self.work,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(path.join("detached.txt"), "detached work\n").unwrap();
+        git(&path, &["add", "detached.txt"]);
+        git(&path, &["commit", "-m", "detached work"]);
+        self
+    }
+
+    /// A checkout-shaped agent directory whose Git registration is gone.
+    pub fn with_an_orphaned_agent_worktree(self, name: &str) -> Self {
+        let path = self.work.join(".claude/worktrees").join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join(".git"), "gitdir: /missing/worktree/admin\n").unwrap();
+        std::fs::write(path.join("only-copy.txt"), "unknown work\n").unwrap();
+        self
     }
 
     /// A worktree with changes that were never committed at all.

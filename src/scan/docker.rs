@@ -1,5 +1,5 @@
 use super::ScanOpts;
-use crate::model::{Action, Candidate, Category, Risk, ScanEvent};
+use crate::model::{Action, Candidate, Category, Eligibility, Risk, ScanEvent};
 use crate::util::human;
 use serde::Deserialize;
 use std::process::Command;
@@ -174,14 +174,33 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         .args(["system", "df", "-v", "--format", "{{json .}}"])
         .output()
     else {
-        return; // docker not installed
+        coverage_notice("Docker CLI is not installed", opts, tx);
+        return;
     };
     if !out.status.success() {
-        // Daemon down, or no permission. Silently contribute nothing.
+        coverage_notice(
+            "Docker daemon unavailable or current context cannot be read",
+            opts,
+            tx,
+        );
         return;
     }
     candidates_from_df(&out.stdout, opts, tx);
     networks(opts, tx);
+}
+
+fn coverage_notice(detail: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let candidate = Candidate::new(
+        Category::Docker,
+        "coverage",
+        "Docker not catalogued",
+        detail,
+        0,
+        Risk::Danger,
+        Action::None,
+    )
+    .with_eligibility(Eligibility::Protected);
+    super::emit(tx, opts, candidate);
 }
 
 /// Everything the scan derives from `docker system df -v --format '{{json .}}'`.
@@ -207,51 +226,108 @@ pub(crate) fn candidates_from_df(json: &[u8], opts: &ScanOpts, tx: &Sender<ScanE
 const UNRECOGNISED: &str =
     "size unrecognised — this version cannot read the figure docker reported";
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "image-ID grouping, active aggregation and multi-tag removal must share one unique-size partition"
+)]
 fn images(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
-    for img in &df.images {
-        // An image backing a live container is not stale.
-        if img.containers.parse::<u32>().unwrap_or(0) > 0 {
+    // `docker system df -v` emits one row per tag. Grouping by image ID is what
+    // makes UniqueSize unique: removing one of several tags frees no layers,
+    // while removing every unused tag can free the figure exactly once.
+    let mut by_id: std::collections::BTreeMap<&str, Vec<&Image>> =
+        std::collections::BTreeMap::new();
+    for image in &df.images {
+        by_id.entry(&image.id).or_default().push(image);
+    }
+
+    let active_size = by_id
+        .values()
+        .filter(|images| {
+            images
+                .iter()
+                .any(|image| image.containers.parse::<u32>().unwrap_or(0) > 0)
+        })
+        .filter_map(|images| {
+            images
+                .iter()
+                .find_map(|image| parse_size(&image.unique_size))
+        })
+        .sum::<u64>();
+    if active_size > 0 {
+        let candidate = Candidate::new(
+            Category::Docker,
+            "active resources",
+            "Images used by containers",
+            "unique image data backing one or more containers",
+            active_size,
+            Risk::Caution,
+            Action::None,
+        )
+        .with_eligibility(Eligibility::Active);
+        super::emit(tx, opts, candidate);
+    }
+
+    for images in by_id.into_values() {
+        if images
+            .iter()
+            .any(|image| image.containers.parse::<u32>().unwrap_or(0) > 0)
+        {
             continue;
         }
-        let dangling = img.repository == "<none>" || img.repository.is_empty();
-        let age = parse_since(&img.created_since);
+        let image = images[0];
+        let mut tags: Vec<String> = images
+            .iter()
+            .filter(|image| image.repository != "<none>" && !image.repository.is_empty())
+            .map(|image| format!("{}:{}", image.repository, image.tag))
+            .collect();
+        tags.sort();
+        tags.dedup();
+        let dangling = tags.is_empty();
+        let age = images
+            .iter()
+            .filter_map(|image| parse_since(&image.created_since))
+            .max();
 
-        // UniqueSize is what actually comes back; the rest is shared with
-        // other images and stays put.
-        let unique = parse_size(&img.unique_size);
-        let total = parse_size(&img.size);
+        let unique = images
+            .iter()
+            .find_map(|image| parse_size(&image.unique_size));
+        let total = images.iter().find_map(|image| parse_size(&image.size));
         let unknown = unique.is_none();
-
         let (group, risk) = if dangling {
             ("dangling images", Risk::Safe)
         } else {
             ("unused images", Risk::Caution)
         };
-
         let name = if dangling {
-            format!("<none>  {}", short_id(&img.id))
+            format!("<none>  {}", short_id(&image.id))
+        } else if tags.len() == 1 {
+            tags[0].clone()
         } else {
-            format!("{}:{}", img.repository, img.tag)
+            format!("{} (+{} tags)", tags[0], tags.len() - 1)
         };
-
-        // Removing by tag is gentler than by ID: an image carrying several tags
-        // only loses the one we name.
-        let target = if dangling {
-            short_id(&img.id).to_string()
+        let targets = if dangling {
+            vec![short_id(&image.id).to_string()]
         } else {
-            format!("{}:{}", img.repository, img.tag)
+            tags.clone()
         };
-
         let detail = match (unique, total) {
-            (Some(unique), Some(total)) => format!(
-                "no containers · {} total, {} shared with other images",
-                human(total),
-                human(total.saturating_sub(unique))
-            ),
+            (Some(unique), Some(total)) => {
+                let tags = if targets.len() > 1 {
+                    format!("{} tags · ", targets.len())
+                } else {
+                    String::new()
+                };
+                format!(
+                    "no containers · {tags}{} total, {} shared with other images",
+                    human(total),
+                    human(total.saturating_sub(unique))
+                )
+            }
             _ => format!("no containers · {UNRECOGNISED}"),
         };
-
-        let cand = Candidate::new(
+        let mut args = vec!["rmi".into()];
+        args.extend(targets);
+        let candidate = Candidate::new(
             Category::Docker,
             group,
             name,
@@ -260,22 +336,42 @@ fn images(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
             risk,
             Action::Run {
                 program: "docker".into(),
-                args: vec!["rmi".into(), target],
+                args,
                 cwd: None,
             },
         )
         .with_age(age);
-
-        // An unreadable size cannot be compared against the floor, and
-        // dropping it there would hide the very item that proves something is
-        // wrong.
         if unknown || dangling || unique.unwrap_or(0) >= opts.min_size {
-            super::emit(tx, opts, cand);
+            super::emit(tx, opts, candidate);
         }
     }
 }
 
 fn containers(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let active_size = df
+        .containers
+        .iter()
+        .filter(|container| {
+            matches!(
+                container.state.as_str(),
+                "running" | "restarting" | "paused"
+            )
+        })
+        .filter_map(|container| parse_size(&container.size))
+        .sum::<u64>();
+    if active_size > 0 {
+        let candidate = Candidate::new(
+            Category::Docker,
+            "active resources",
+            "Running container writable layers",
+            "currently used by running, restarting or paused containers",
+            active_size,
+            Risk::Caution,
+            Action::None,
+        )
+        .with_eligibility(Eligibility::Active);
+        super::emit(tx, opts, candidate);
+    }
     for c in &df.containers {
         if c.state == "running" || c.state == "restarting" || c.state == "paused" {
             continue;
@@ -304,6 +400,25 @@ fn containers(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
 }
 
 fn volumes(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let active_size = df
+        .volumes
+        .iter()
+        .filter(|volume| volume.links.parse::<u32>().unwrap_or(0) > 0)
+        .filter_map(|volume| parse_size(&volume.size))
+        .sum::<u64>();
+    if active_size > 0 {
+        let candidate = Candidate::new(
+            Category::Docker,
+            "active resources",
+            "Volumes attached to containers",
+            "container data currently referenced by at least one container",
+            active_size,
+            Risk::Danger,
+            Action::None,
+        )
+        .with_eligibility(Eligibility::Active);
+        super::emit(tx, opts, candidate);
+    }
     for v in &df.volumes {
         // Links counts containers holding the volume.
         if v.links.parse::<u32>().unwrap_or(0) > 0 {
@@ -350,7 +465,96 @@ fn volumes(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "active, recent, unknown and reclaimable BuildKit records must be partitioned together"
+)]
 fn build_cache(df: &Df, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let active: Vec<_> = df
+        .build_cache
+        .iter()
+        .filter(|record| record.in_use != "false" || record.shared != "false")
+        .collect();
+    let active_size = active
+        .iter()
+        .filter_map(|record| parse_size(&record.size))
+        .sum();
+    if active_size > 0 {
+        let candidate = Candidate::new(
+            Category::Docker,
+            "active resources",
+            "BuildKit cache in use or shared",
+            format!("{} layer records retained by Docker", active.len()),
+            active_size,
+            Risk::Safe,
+            Action::None,
+        )
+        .with_eligibility(Eligibility::Active);
+        super::emit(tx, opts, candidate);
+    }
+
+    let recent: Vec<_> = df
+        .build_cache
+        .iter()
+        .filter(|record| record.in_use == "false" && record.shared == "false")
+        .filter(|record| {
+            opts.stale_days > 0
+                && parse_since(&record.last_used_since).is_some_and(|age| age < opts.stale_days)
+        })
+        .collect();
+    let recent_size = recent
+        .iter()
+        .filter_map(|record| parse_size(&record.size))
+        .sum();
+    if recent_size > 0 {
+        let age = recent
+            .iter()
+            .filter_map(|record| parse_since(&record.last_used_since))
+            .max();
+        let candidate = Candidate::new(
+            Category::Docker,
+            "recent resources",
+            "Recent BuildKit cache",
+            format!(
+                "{} unused layer records below the staleness threshold",
+                recent.len()
+            ),
+            recent_size,
+            Risk::Safe,
+            Action::None,
+        )
+        .with_age(age)
+        .with_eligibility(Eligibility::Recent);
+        super::emit(tx, opts, candidate);
+    }
+
+    let unknown: Vec<_> = df
+        .build_cache
+        .iter()
+        .filter(|record| record.in_use == "false" && record.shared == "false")
+        .filter(|record| parse_since(&record.last_used_since).is_none())
+        .collect();
+    let unknown_size = unknown
+        .iter()
+        .filter_map(|record| parse_size(&record.size))
+        .sum();
+    if !unknown.is_empty() {
+        let candidate = Candidate::new(
+            Category::Docker,
+            "coverage",
+            "BuildKit cache with unknown age",
+            format!(
+                "{} layer records cannot be compared with stale_days",
+                unknown.len()
+            ),
+            unknown_size,
+            Risk::Safe,
+            Action::None,
+        )
+        .with_eligibility(Eligibility::Protected);
+        super::emit(tx, opts, candidate);
+    }
+
     // BuildKit records cannot be pruned individually by ID, so the whole
     // reclaimable set is offered as one item — which is also the single
     // biggest win on most machines.

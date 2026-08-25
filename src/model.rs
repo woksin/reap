@@ -3,6 +3,11 @@ use std::path::PathBuf;
 /// Top-level buckets shown in the sidebar.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Category {
+    /// Read-only catalogue rows that explain occupied space but are not deletion
+    /// candidates. Keeping these beside, rather than inside, the reclaim
+    /// categories lets reap answer "where did the disk go?" without implying
+    /// that ordinary data is debris.
+    Storage,
     Git,
     Artifacts,
     Docker,
@@ -19,7 +24,8 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::Storage,
         Self::Git,
         Self::Artifacts,
         Self::Docker,
@@ -30,12 +36,40 @@ impl Category {
 
     pub const fn title(self) -> &'static str {
         match self {
+            Self::Storage => "Disk usage",
             Self::Git => "Git",
             Self::Artifacts => "Build artifacts",
             Self::Docker => "Docker",
             Self::Caches => "Caches",
             Self::Agents => "Coding agents",
             Self::Personal => "Personal",
+        }
+    }
+}
+
+/// How dangerous it is to delete a candidate.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Eligibility {
+    /// Old enough, sufficiently understood, and available for selection.
+    Reclaimable,
+    /// Recognised content that has not reached the configured age.
+    Recent,
+    /// Evidence says a process or tool is still using it.
+    Active,
+    /// Explicitly retained, locked, or otherwise not safe to offer.
+    Protected,
+    /// Ordinary or unknown disk usage shown only to explain occupied space.
+    Informational,
+}
+
+impl Eligibility {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Reclaimable => "reclaimable",
+            Self::Recent => "recent",
+            Self::Active => "active",
+            Self::Protected => "protected",
+            Self::Informational => "usage",
         }
     }
 }
@@ -71,12 +105,53 @@ impl Risk {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum BranchProof {
+    /// The scanned OID must remain reachable from this exact ref, whose tip is
+    /// atomically verified alongside branch deletion.
+    ContainsRef {
+        reference: String,
+        expected_tip: String,
+    },
+    /// Every linear patch must still be present in this exact upstream tip,
+    /// which is atomically verified alongside branch deletion.
+    PatchesIn {
+        reference: String,
+        expected_tip: String,
+    },
+    /// Irreversible deletion was explicitly confirmed; no recoverability claim.
+    None,
+}
+
 /// What actually happens when a candidate is reaped.
 #[derive(Clone, Debug)]
 pub enum Action {
+    /// Inventory and protected rows deliberately have no destructive action.
+    None,
     /// Recursively remove a path.
     Remove(PathBuf),
-    /// Shell out, e.g. `git worktree remove` or `docker rmi`.
+    /// Atomically delete exactly the branch OID that was assessed, after
+    /// rechecking the recoverability proof used for its risk grade.
+    GitBranchDelete {
+        repo: PathBuf,
+        branch: String,
+        expected_oid: String,
+        proof: BranchProof,
+        force: bool,
+    },
+    /// Remove a linked worktree only if HEAD and status still match the scan.
+    /// This closes the race where an agent resumes work after the row appears.
+    GitWorktreeRemove {
+        repo: PathBuf,
+        path: PathBuf,
+        expected_head: String,
+        expected_status: String,
+        /// Detached HEAD was considered rebuildable only because another ref
+        /// contained it; that proof must still hold at execution time.
+        require_surviving_ref: bool,
+        force: bool,
+    },
+    /// Shell out, e.g. `docker rmi` or a package-manager cleaner.
     Run {
         program: String,
         args: Vec<String>,
@@ -87,7 +162,27 @@ pub enum Action {
 impl Action {
     pub fn describe(&self) -> String {
         match self {
+            Self::None => "not selectable".to_string(),
             Self::Remove(p) => format!("rm -rf {}", crate::util::tilde(p)),
+            Self::GitBranchDelete {
+                repo,
+                branch,
+                force,
+                ..
+            } => format!(
+                "git branch {} {}  # atomic OID check in {}",
+                if *force { "-D" } else { "-d" },
+                branch,
+                crate::util::tilde(repo)
+            ),
+            Self::GitWorktreeRemove {
+                repo, path, force, ..
+            } => format!(
+                "git worktree remove {}{}  # in {}",
+                if *force { "--force " } else { "" },
+                crate::util::tilde(path),
+                crate::util::tilde(repo)
+            ),
             Self::Run { program, args, .. } => {
                 format!("{program} {}", args.join(" "))
             }
@@ -95,7 +190,8 @@ impl Action {
     }
 }
 
-/// One reapable thing.
+/// One recognised disk finding. Eligibility decides whether it is currently
+/// reapable or present only to explain occupied bytes.
 #[derive(Clone, Debug)]
 pub struct Candidate {
     pub category: Category,
@@ -109,7 +205,14 @@ pub struct Candidate {
     /// `None` when age is not meaningful (e.g. docker build cache aggregate).
     pub age_days: Option<u64>,
     pub risk: Risk,
+    /// Whether this row can currently be acted on. Risk describes the cost if
+    /// it can; eligibility describes whether it is presently a candidate.
+    pub eligibility: Eligibility,
     pub action: Action,
+    /// The filesystem tree affected by the action, including command actions
+    /// such as `git worktree remove`. Used to avoid counting or executing a
+    /// nested artifact twice.
+    pub footprint: Option<PathBuf>,
     pub selected: bool,
 }
 
@@ -123,6 +226,10 @@ impl Candidate {
         risk: Risk,
         action: Action,
     ) -> Self {
+        let footprint = match &action {
+            Action::Remove(path) | Action::GitWorktreeRemove { path, .. } => Some(path.clone()),
+            Action::None | Action::GitBranchDelete { .. } | Action::Run { .. } => None,
+        };
         Self {
             category,
             group: group.into(),
@@ -131,7 +238,9 @@ impl Candidate {
             size,
             age_days: None,
             risk,
+            eligibility: Eligibility::Reclaimable,
             action,
+            footprint,
             selected: false,
         }
     }
@@ -139,6 +248,20 @@ impl Candidate {
     pub const fn with_age(mut self, days: Option<u64>) -> Self {
         self.age_days = days;
         self
+    }
+
+    pub fn with_footprint(mut self, path: PathBuf) -> Self {
+        self.footprint = Some(path);
+        self
+    }
+
+    pub const fn with_eligibility(mut self, eligibility: Eligibility) -> Self {
+        self.eligibility = eligibility;
+        self
+    }
+
+    pub const fn selectable(&self) -> bool {
+        matches!(self.eligibility, Eligibility::Reclaimable) && !matches!(self.action, Action::None)
     }
 }
 
