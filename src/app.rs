@@ -64,6 +64,10 @@ pub type ReapLogEntry = (String, bool, Option<String>);
 
 pub struct App {
     pub items: Vec<Candidate>,
+    /// Unique-byte accounting aligned with `items`, rebuilt only when the item
+    /// model changes rather than once for every total drawn in a frame.
+    assessed_exclusive: Vec<u64>,
+    storage_exclusive: Vec<u64>,
     pub nodes: Vec<Node>,
     pub visible: Vec<usize>,
 
@@ -132,6 +136,10 @@ pub struct App {
     /// A newer release, once the background check has found one.
     pub update_available: Option<String>,
     update_rx: Option<Receiver<String>>,
+    /// Disk probing may invoke platform tools. It must never hold up the first
+    /// frame or delay the scan workers from starting.
+    topology_rx: Option<Receiver<bool>>,
+    pool_rx: Option<Receiver<(bool, bool)>>,
 
     pub opts: ScanOpts,
     scan_rx: Option<Receiver<ScanEvent>>,
@@ -139,11 +147,10 @@ pub struct App {
     pub quit: bool,
 }
 
-fn storage_topology(opts: &ScanOpts) -> (Option<(u64, u64)>, bool) {
-    let current = std::env::current_dir()
-        .ok()
-        .and_then(|directory| crate::util::disk_stat(&directory));
-    let disk = current.as_ref().map(|stat| (stat.free, stat.total));
+fn storage_topology(opts: &ScanOpts) -> bool {
+    let Some(current_path) = std::env::current_dir().ok() else {
+        return false;
+    };
     let mut probes = opts.roots.clone();
     if let Some(home) = scan::home_dir() {
         probes.push(home);
@@ -151,12 +158,17 @@ fn storage_topology(opts: &ScanOpts) -> (Option<(u64, u64)>, bool) {
     if !opts.skip_inventory {
         probes.extend(scan::local_mount_roots());
     }
-    let single_space_pool = current.as_ref().is_some_and(|current| {
+    if probes
+        .iter()
+        .all(|path| crate::util::shares_volume(&current_path, path))
+    {
+        return true;
+    }
+    crate::util::disk_stat(&current_path).is_some_and(|current| {
         probes
             .iter()
-            .all(|path| crate::util::disk_stat(path).is_some_and(|stat| stat.shares_pool(current)))
-    });
-    (disk, single_space_pool)
+            .all(|path| crate::util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current)))
+    })
 }
 
 impl App {
@@ -167,9 +179,10 @@ impl App {
         config: crate::config::Config,
         config_path: std::path::PathBuf,
     ) -> Self {
-        let (disk, single_space_pool) = storage_topology(&opts);
         let mut app = Self {
             items: Vec::new(),
+            assessed_exclusive: Vec::new(),
+            storage_exclusive: Vec::new(),
             nodes: Vec::new(),
             visible: Vec::new(),
             expanded: HashSet::new(),
@@ -191,8 +204,8 @@ impl App {
             trashed: Vec::new(),
             disk_before: None,
             disk_after: None,
-            disk,
-            single_space_pool,
+            disk: None,
+            single_space_pool: false,
             projection_safe: false,
             recipes: crate::recipes::compile(&config),
             recipe_idx: 0,
@@ -214,6 +227,8 @@ impl App {
             config,
             config_path,
             opts,
+            topology_rx: None,
+            pool_rx: None,
             scan_rx: None,
             reap_rx: None,
             quit: false,
@@ -223,9 +238,21 @@ impl App {
     }
 
     pub fn rescan(&mut self) {
-        let (disk, single_space_pool) = storage_topology(&self.opts);
-        self.disk = disk;
-        self.single_space_pool = single_space_pool;
+        crate::util::clear_disk_stat_cache();
+        // Capacity is cheap (`df`/the Win32 call) and keeps the first frame
+        // informative. Storage-pool identity is the potentially expensive part
+        // and is resolved by the background topology task below.
+        self.disk = std::env::current_dir()
+            .ok()
+            .and_then(|directory| crate::util::disk_free(&directory));
+        self.single_space_pool = false;
+        let (topology_tx, topology_rx) = channel();
+        self.topology_rx = Some(topology_rx);
+        self.pool_rx = None;
+        let topology_opts = self.opts.clone();
+        std::thread::spawn(move || {
+            let _ = topology_tx.send(storage_topology(&topology_opts));
+        });
         self.items.clear();
         self.reap_log.clear();
         self.freed = 0;
@@ -243,29 +270,52 @@ impl App {
     }
 
     fn sources_share_current_pool<'a>(candidates: impl Iterator<Item = &'a Candidate>) -> bool {
-        let Some(current) = std::env::current_dir()
-            .ok()
-            .and_then(|directory| crate::util::disk_stat(&directory))
-        else {
+        let candidates: Vec<_> = candidates.filter(|item| item.size > 0).collect();
+        if candidates.is_empty() {
+            return true;
+        }
+        let Some(current_path) = std::env::current_dir().ok() else {
             return false;
         };
-        candidates.filter(|item| item.size > 0).all(|item| {
-            item.footprint.as_deref().is_some_and(|path| {
-                crate::util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current))
-            })
-        })
+        let paths: Option<Vec<_>> = candidates
+            .iter()
+            .map(|item| item.footprint.as_deref())
+            .collect();
+        let Some(paths) = paths else { return false };
+        if paths
+            .iter()
+            .all(|path| crate::util::shares_volume(&current_path, path))
+        {
+            return true;
+        }
+        let Some(current) = crate::util::disk_stat(&current_path) else {
+            return false;
+        };
+        paths
+            .iter()
+            .all(|path| crate::util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current)))
     }
 
-    fn reclaimable_sources_share_pool(&self) -> bool {
-        Self::sources_share_current_pool(self.items.iter().filter(|item| item.selectable()))
-    }
-
-    fn inventory_sources_share_pool(&self) -> bool {
-        Self::sources_share_current_pool(
-            self.items
-                .iter()
-                .filter(|item| item.eligibility == crate::model::Eligibility::Informational),
-        )
+    fn start_pool_assessment(&mut self) {
+        let inventory: Vec<_> = self
+            .items
+            .iter()
+            .filter(|item| item.eligibility == crate::model::Eligibility::Informational)
+            .cloned()
+            .collect();
+        let reclaimable: Vec<_> = self
+            .items
+            .iter()
+            .filter(|item| item.selectable())
+            .cloned()
+            .collect();
+        let (pool_tx, pool_rx) = channel();
+        self.pool_rx = Some(pool_rx);
+        std::thread::spawn(move || {
+            let inventory_pool = Self::sources_share_current_pool(inventory.iter());
+            let reclaimable_pool = Self::sources_share_current_pool(reclaimable.iter());
+            let _ = pool_tx.send((inventory_pool, reclaimable_pool));
+        });
     }
 
     pub fn selected_projection_safe(&self) -> bool {
@@ -289,6 +339,27 @@ impl App {
             dirty = true;
         }
 
+        if let Some(rx) = &self.topology_rx
+            && let Ok(single_space_pool) = rx.try_recv()
+        {
+            // Once findings have completed, their actual footprints are more
+            // precise than the configured-root approximation from startup.
+            if self.scanning() {
+                self.single_space_pool = single_space_pool;
+            }
+            self.topology_rx = None;
+            dirty = true;
+        }
+
+        if let Some(rx) = &self.pool_rx
+            && let Ok((single_space_pool, projection_safe)) = rx.try_recv()
+        {
+            self.single_space_pool = single_space_pool;
+            self.projection_safe = projection_safe;
+            self.pool_rx = None;
+            dirty = true;
+        }
+
         if let Some(rx) = &self.scan_rx {
             // Bound the drain so a fast scanner cannot starve the render loop.
             for _ in 0..512 {
@@ -309,8 +380,7 @@ impl App {
                 }
             }
             if !self.scanning() && self.status != "scan complete" {
-                self.single_space_pool = self.inventory_sources_share_pool();
-                self.projection_safe = self.reclaimable_sources_share_pool();
+                self.start_pool_assessment();
                 self.status = "scan complete".into();
             }
         }
@@ -356,9 +426,55 @@ impl App {
         dirty
     }
 
+    fn rebuild_accounting(&mut self) {
+        let assessed_indices: Vec<_> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                matches!(
+                    item.eligibility,
+                    crate::model::Eligibility::Reclaimable | crate::model::Eligibility::Recent
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let assessed: Vec<_> = assessed_indices
+            .iter()
+            .map(|index| self.items[*index].clone())
+            .collect();
+        self.assessed_exclusive = vec![0; self.items.len()];
+        for (index, size) in assessed_indices
+            .into_iter()
+            .zip(crate::accounting::exclusive_sizes(&assessed))
+        {
+            self.assessed_exclusive[index] = size;
+        }
+
+        let storage_indices: Vec<_> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.category == Category::Storage)
+            .map(|(index, _)| index)
+            .collect();
+        let storage: Vec<_> = storage_indices
+            .iter()
+            .map(|index| self.items[*index].clone())
+            .collect();
+        self.storage_exclusive = vec![0; self.items.len()];
+        for (index, size) in storage_indices
+            .into_iter()
+            .zip(crate::accounting::exclusive_sizes(&storage))
+        {
+            self.storage_exclusive[index] = size;
+        }
+    }
+
     /// Recompute the sidebar tree and the filtered, sorted item view.
     pub fn rebuild(&mut self) {
         let selected_node = self.nodes.get(self.node_idx).cloned();
+        self.rebuild_accounting();
 
         // Sidebar: every category that has items, with its groups underneath
         // when expanded.
@@ -440,27 +556,20 @@ impl App {
 
     // ---- derived totals -------------------------------------------------
 
-    fn assessed_sizes(&self) -> (Vec<Candidate>, Vec<u64>) {
-        let assessed: Vec<_> = self
-            .items
+    fn assessed_sizes(&self) -> impl Iterator<Item = (&Candidate, u64)> {
+        self.items
             .iter()
-            .filter(|item| {
+            .zip(self.assessed_exclusive.iter().copied())
+            .filter(|(item, _)| {
                 matches!(
                     item.eligibility,
                     crate::model::Eligibility::Reclaimable | crate::model::Eligibility::Recent
                 )
             })
-            .cloned()
-            .collect();
-        let sizes = crate::accounting::exclusive_sizes(&assessed);
-        (assessed, sizes)
     }
 
     pub fn total_size(&self) -> u64 {
-        let (assessed, sizes) = self.assessed_sizes();
-        assessed
-            .iter()
-            .zip(sizes)
+        self.assessed_sizes()
             .filter(|(item, _)| item.eligibility == crate::model::Eligibility::Reclaimable)
             .map(|(_, size)| size)
             .sum()
@@ -490,10 +599,7 @@ impl App {
         // Partition recent and reclaimable rows together. A recent cache root
         // can contain individually stale package children; accounting each
         // state separately would promise the same child bytes in both totals.
-        let (assessed, exclusive) = self.assessed_sizes();
-        assessed
-            .iter()
-            .zip(exclusive)
+        self.assessed_sizes()
             .filter(|(item, _)| item.eligibility == crate::model::Eligibility::Recent)
             .map(|(_, size)| size)
             .sum()
@@ -501,10 +607,7 @@ impl App {
 
     /// Total unique bytes assigned to candidates at a given risk level.
     pub fn risk_size(&self, risk: Risk) -> u64 {
-        let (assessed, exclusive) = self.assessed_sizes();
-        assessed
-            .iter()
-            .zip(exclusive)
+        self.assessed_sizes()
             .filter(|(item, _)| {
                 item.eligibility == crate::model::Eligibility::Reclaimable && item.risk == risk
             })
@@ -548,20 +651,15 @@ impl App {
 
     pub fn category_size(&self, cat: Category) -> u64 {
         if cat == Category::Storage {
-            let inventory: Vec<_> = self
+            return self
                 .items
                 .iter()
-                .filter(|item| item.category == cat)
-                .cloned()
-                .collect();
-            return crate::accounting::exclusive_sizes(&inventory)
-                .into_iter()
+                .zip(&self.storage_exclusive)
+                .filter(|(item, _)| item.category == cat)
+                .map(|(_, size)| *size)
                 .sum();
         }
-        let (assessed, exclusive) = self.assessed_sizes();
-        assessed
-            .iter()
-            .zip(exclusive)
+        self.assessed_sizes()
             .filter(|(item, _)| {
                 item.eligibility == crate::model::Eligibility::Reclaimable && item.category == cat
             })
@@ -575,20 +673,15 @@ impl App {
 
     pub fn group_size(&self, cat: Category, group: &str) -> u64 {
         if cat == Category::Storage {
-            let matching: Vec<_> = self
+            return self
                 .items
                 .iter()
-                .filter(|item| item.category == cat && item.group == group)
-                .cloned()
-                .collect();
-            return crate::accounting::exclusive_sizes(&matching)
-                .into_iter()
+                .zip(&self.storage_exclusive)
+                .filter(|(item, _)| item.category == cat && item.group == group)
+                .map(|(_, size)| *size)
                 .sum();
         }
-        let (assessed, exclusive) = self.assessed_sizes();
-        assessed
-            .iter()
-            .zip(exclusive)
+        self.assessed_sizes()
             .filter(|(item, _)| {
                 item.eligibility == crate::model::Eligibility::Reclaimable
                     && item.category == cat

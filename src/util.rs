@@ -3,8 +3,7 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Format a byte count in SI units, matching what macOS and `docker system df`
@@ -176,19 +175,26 @@ pub fn newest_mtime(path: &Path) -> Option<u64> {
         return secs(&own);
     }
 
-    let entries: Vec<_> = fs::read_dir(path).ok()?.flatten().collect();
-    let deepest = entries
+    let entries: Option<Vec<_>> = fs::read_dir(path).ok()?.map(Result::ok).collect();
+    let nested: Option<Vec<Option<u64>>> = entries?
         .par_iter()
-        .filter_map(|e| match e.file_type() {
+        .map(|entry| {
+            let kind = entry.file_type().ok()?;
             // As with `dir_size`: `read_dir` file types do not follow symlinks,
-            // so a link farm contributes nothing and a cycle cannot trap this.
-            Ok(ft) if ft.is_dir() => newest_mtime(&e.path()),
-            Ok(ft) if ft.is_file() => e.metadata().ok().as_ref().and_then(secs),
-            _ => None,
+            // so links contribute nothing and cycles cannot trap this walk.
+            if kind.is_dir() {
+                Some(Some(newest_mtime(&entry.path())?))
+            } else if kind.is_file() {
+                let metadata = entry.metadata().ok()?;
+                Some(Some(secs(&metadata)?))
+            } else {
+                Some(None)
+            }
         })
-        .max();
+        .collect();
+    let deepest = nested?.into_iter().flatten().max();
 
-    secs(&own).max(deepest).or(deepest)
+    Some(secs(&own)?.max(deepest.unwrap_or(0)))
 }
 
 /// Size of a path whether it is a file or a directory.
@@ -304,12 +310,8 @@ impl DiskStat {
     }
 }
 
-/// Filesystem and capacity information for the volume holding `path`.
-///
-/// `statvfs` is not in std and this is queried a handful of times per run, so
-/// shelling out to `df` costs nothing and keeps the dependency list short.
 #[cfg(not(windows))]
-pub fn disk_stat(path: &Path) -> Option<DiskStat> {
+fn df_line(path: &Path) -> Option<DfLine> {
     let out = std::process::Command::new("df")
         .arg("-Pk")
         .arg(path)
@@ -320,7 +322,16 @@ pub fn disk_stat(path: &Path) -> Option<DiskStat> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     // Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on
-    let row = parse_df_line(text.lines().nth(1)?)?;
+    parse_df_line(text.lines().nth(1)?)
+}
+
+/// Filesystem and capacity information for the volume holding `path`.
+///
+/// `statvfs` is not in std and this is queried a handful of times per run, so
+/// shelling out to `df` costs nothing and keeps the dependency list short.
+#[cfg(not(windows))]
+fn disk_stat_fresh(path: &Path) -> Option<DiskStat> {
+    let row = df_line(path)?;
     let mount = row.mount;
     #[cfg(target_os = "macos")]
     let pool = apfs_container(&mount).unwrap_or_else(|| row.filesystem.clone());
@@ -364,11 +375,22 @@ fn apfs_container(mount: &Path) -> Option<String> {
     parse_apfs_container(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Mount point, free bytes, and total bytes without resolving storage-pool
+/// identity. On macOS this deliberately avoids `diskutil`.
+#[cfg(not(windows))]
+pub fn disk_capacity(path: &Path) -> Option<(PathBuf, u64, u64)> {
+    let row = df_line(path)?;
+    Some((
+        row.mount,
+        row.available_kb.saturating_mul(1024),
+        row.total_kb.saturating_mul(1024),
+    ))
+}
+
 /// Free and total bytes on the volume holding `path`.
 #[cfg(not(windows))]
 pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
-    let stat = disk_stat(path)?;
-    Some((stat.free, stat.total))
+    disk_capacity(path).map(|(_, free, total)| (free, total))
 }
 
 /// Free and total bytes on the volume holding `path`.
@@ -419,9 +441,19 @@ pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(windows)]
-pub fn disk_stat(path: &Path) -> Option<DiskStat> {
+pub fn disk_capacity(path: &Path) -> Option<(PathBuf, u64, u64)> {
     let (free, total) = disk_free(path)?;
-    let mount = path.ancestors().last()?.to_path_buf();
+    let mount = fs::canonicalize(existing_ancestor(path)?)
+        .ok()?
+        .ancestors()
+        .last()?
+        .to_path_buf();
+    Some((mount, free, total))
+}
+
+#[cfg(windows)]
+fn disk_stat_fresh(path: &Path) -> Option<DiskStat> {
+    let (mount, free, total) = disk_capacity(path)?;
     let pool = mount.to_string_lossy().to_lowercase();
     Some(DiskStat {
         mount,
@@ -429,6 +461,72 @@ pub fn disk_stat(path: &Path) -> Option<DiskStat> {
         free,
         total,
     })
+}
+
+fn existing_ancestor(mut path: &Path) -> Option<&Path> {
+    loop {
+        if path.exists() {
+            return Some(path);
+        }
+        path = path.parent()?;
+    }
+}
+
+#[cfg(unix)]
+fn volume_key(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let device = fs::metadata(existing_ancestor(path)?).ok()?.dev();
+    Some(format!("dev:{device}"))
+}
+
+#[cfg(windows)]
+fn volume_key(path: &Path) -> Option<String> {
+    let path = fs::canonicalize(existing_ancestor(path)?).ok()?;
+    Some(path.ancestors().last()?.to_string_lossy().to_lowercase())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn volume_key(path: &Path) -> Option<String> {
+    fs::canonicalize(existing_ancestor(path)?)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Whether two paths are on the same mounted volume. This is a metadata check,
+/// unlike storage-pool resolution, which may need a platform subprocess.
+pub fn shares_volume(left: &Path, right: &Path) -> bool {
+    volume_key(left)
+        .zip(volume_key(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn disk_stat_cache() -> &'static Mutex<std::collections::HashMap<String, DiskStat>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, DiskStat>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Forget the per-run storage snapshot before an explicit rescan.
+pub fn clear_disk_stat_cache() {
+    if let Ok(mut cache) = disk_stat_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Filesystem and capacity information for the volume holding `path`.
+///
+/// A scan can produce thousands of paths but generally only one or two host
+/// volumes. Resolve each volume once: on macOS this also turns one `diskutil`
+/// process per finding into one process per mounted volume.
+pub fn disk_stat(path: &Path) -> Option<DiskStat> {
+    let key = volume_key(path)?;
+    let mut cache = disk_stat_cache().lock().ok()?;
+    if let Some(stat) = cache.get(&key) {
+        return Some(stat.clone());
+    }
+    let stat = disk_stat_fresh(path)?;
+    cache.insert(key, stat.clone());
+    drop(cache);
+    Some(stat)
 }
 
 /// Shorten a path for display, replacing the home directory with `~`.
@@ -578,6 +676,27 @@ mod tests {
         // Not being able to tell must never come back as "nothing was written",
         // which is the answer that would make a store look finished.
         assert_eq!(newest_mtime(Path::new("/nonexistent/reap/tree")), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_partly_unreadable_tree_reports_no_activity_verdict() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "reap-unreadable-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let hidden = root.join("hidden");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("active.jsonl"), "history").unwrap();
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o0)).unwrap();
+
+        let result = newest_mtime(&root);
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&root).ok();
+        assert_eq!(result, None, "a partial walk must fail closed");
     }
 
     #[test]

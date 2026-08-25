@@ -449,22 +449,35 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
         "by_risk": by_risk,
         "findings": entries,
     });
-    if let Some(current) = util::disk_stat(&std::env::current_dir()?) {
-        let catalogued_in_pool = items
+    let current_path = std::env::current_dir()?;
+    if let Some((mount, free, capacity)) = util::disk_capacity(&current_path) {
+        let mut current_pool = None;
+        let mut catalogued_in_pool = 0u64;
+        for item in items
             .iter()
             .filter(|item| item.eligibility == model::Eligibility::Informational)
-            .filter_map(|item| {
-                let path = item.footprint.as_deref()?;
-                let stat = util::disk_stat(path)?;
-                stat.shares_pool(&current).then_some(item.size)
-            })
-            .sum::<u64>();
-        let used = current.total.saturating_sub(current.free);
+        {
+            let Some(path) = item.footprint.as_deref() else {
+                continue;
+            };
+            let shares_pool = util::shares_volume(&current_path, path) || {
+                if current_pool.is_none() {
+                    current_pool = util::disk_stat(&current_path);
+                }
+                current_pool.as_ref().is_some_and(|current| {
+                    util::disk_stat(path).is_some_and(|stat| stat.shares_pool(current))
+                })
+            };
+            if shares_pool {
+                catalogued_in_pool = catalogued_in_pool.saturating_add(item.size);
+            }
+        }
+        let used = capacity.saturating_sub(free);
         out["disk"] = serde_json::json!({
-            "mount": current.mount,
-            "free_bytes": current.free,
+            "mount": mount,
+            "free_bytes": free,
             "used_bytes": used,
-            "total_bytes": current.total,
+            "total_bytes": capacity,
             "catalogued_bytes_in_pool": catalogued_in_pool,
             "system_or_unclassified_bytes": used.saturating_sub(catalogued_in_pool),
             "projection_note": "Docker logical resources may not immediately release the same number of host bytes; separate filesystems are not pooled",
@@ -746,30 +759,38 @@ fn list_mode(opts: ScanOpts) -> Result<()> {
     println!("  Recent:      {}", human(recent));
     println!("  Catalogued:  {}", human(catalogued));
 
-    if let Some(current) = util::disk_stat(&std::env::current_dir()?) {
-        let one_pool = assessed
+    let current_path = std::env::current_dir()?;
+    if let Some((free, capacity)) = util::disk_free(&current_path) {
+        let paths: Option<Vec<_>> = assessed
             .iter()
             .zip(&assessed_bytes)
             .filter(|(item, bytes)| {
                 item.eligibility == model::Eligibility::Reclaimable && **bytes > 0
             })
-            .all(|(item, _)| {
-                item.footprint.as_deref().is_some_and(|path| {
-                    util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current))
+            .map(|(item, _)| item.footprint.as_deref())
+            .collect();
+        let one_pool = paths.is_some_and(|paths| {
+            paths
+                .iter()
+                .all(|path| util::shares_volume(&current_path, path))
+                || util::disk_stat(&current_path).is_some_and(|current| {
+                    paths.iter().all(|path| {
+                        util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current))
+                    })
                 })
-            });
+        });
         if one_pool {
             println!(
                 "  Disk: {} free of {} — reaping everything would leave ≈ {} free",
-                human(current.free),
-                human(current.total),
-                human(current.free.saturating_add(total))
+                human(free),
+                human(capacity),
+                human(free.saturating_add(total))
             );
         } else {
             println!(
                 "  Disk: {} free of {} — multiple storage pools; no combined projection",
-                human(current.free),
-                human(current.total)
+                human(free),
+                human(capacity)
             );
         }
     }

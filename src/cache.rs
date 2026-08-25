@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// How long a measurement stays trustworthy.
 // Deep rewrites need not move a candidate root's mtime or direct entry list.
@@ -50,9 +50,19 @@ struct Entry {
     allocated_size: Option<u64>,
 }
 
+type Measurement = (u64, u64, Option<u64>);
+
+struct PendingMeasurement {
+    result: Mutex<Option<Measurement>>,
+    ready: Condvar,
+}
+
 #[derive(Default)]
 pub struct SizeCache {
     entries: Mutex<HashMap<PathBuf, Entry>>,
+    /// Scanner categories overlap. Coalesce an exact-path miss so two workers
+    /// never launch the same recursive traversal at the same time.
+    in_flight: Mutex<HashMap<PathBuf, Arc<PendingMeasurement>>>,
     enabled: bool,
     dirty: Mutex<bool>,
 }
@@ -111,7 +121,7 @@ fn entries_of(path: &Path) -> Option<u64> {
 
 impl SizeCache {
     pub fn load(enabled: bool) -> Self {
-        let entries = if enabled {
+        let mut entries = if enabled {
             cache_path()
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|b| serde_json::from_slice::<HashMap<PathBuf, Entry>>(&b).ok())
@@ -119,14 +129,27 @@ impl SizeCache {
         } else {
             HashMap::new()
         };
+        let now = crate::util::now_secs();
+        // Expired or old-format entries cannot produce a hit. Drop them once
+        // while loading instead of carrying them through every lookup and
+        // serialising them again at shutdown.
+        entries.retain(|_, entry| {
+            entry.version == CACHE_ENTRY_VERSION
+                && entry.entries.is_some()
+                && entry.newest_mtime.is_some()
+                && entry.allocated_size.is_some()
+                && now.saturating_sub(entry.measured_at) < MAX_AGE_SECS
+        });
         Self {
             entries: Mutex::new(entries),
+            in_flight: Mutex::new(HashMap::new()),
             enabled,
             dirty: Mutex::new(false),
         }
     }
 
-    /// Measured size of `path`, reusing a previous measurement when it still holds.
+    /// Measured size of `path`, retained as the narrow test-facing convenience.
+    #[cfg(test)]
     pub fn size_of(&self, path: &Path) -> u64 {
         self.measure_full(path).0
     }
@@ -141,7 +164,46 @@ impl SizeCache {
         self.measure_full(path).1
     }
 
-    fn measure_full(&self, path: &Path) -> (u64, u64, Option<u64>) {
+    fn cached_measurement(
+        &self,
+        path: &Path,
+        now: u64,
+        mtime: Option<u64>,
+        listing: Option<u64>,
+    ) -> Option<Measurement> {
+        let mtime = mtime?;
+        let entries = self.entries.lock().ok()?;
+        let entry = *entries.get(path)?;
+        drop(entries);
+        if entry.version != CACHE_ENTRY_VERSION
+            || entry.mtime != mtime
+            || entry.entries.is_none()
+            || entry.entries != listing
+            || entry.newest_mtime.is_none()
+            || entry.allocated_size.is_none()
+            || now.saturating_sub(entry.measured_at) >= MAX_AGE_SECS
+        {
+            return None;
+        }
+        Some((entry.size, entry.allocated_size?, entry.newest_mtime))
+    }
+
+    fn complete_pending(
+        &self,
+        path: &Path,
+        pending: &PendingMeasurement,
+        measurement: Measurement,
+    ) {
+        if let Ok(mut result) = pending.result.lock() {
+            *result = Some(measurement);
+        }
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(path);
+        }
+        pending.ready.notify_all();
+    }
+
+    fn measure_full(&self, path: &Path) -> Measurement {
         if !self.enabled {
             return crate::util::dir_measure_full(path);
         }
@@ -149,25 +211,52 @@ impl SizeCache {
         let mtime = mtime_of(path);
         let listing = entries_of(path);
 
-        if let Some(mtime) = mtime
-            && let Ok(entries) = self.entries.lock()
-            && let Some(entry) = entries.get(path)
-            && entry.version == CACHE_ENTRY_VERSION
-            && entry.mtime == mtime
-            && entry.entries.is_some()
-            && entry.entries == listing
-            && entry.newest_mtime.is_some()
-            && entry.allocated_size.is_some()
-            && now.saturating_sub(entry.measured_at) < MAX_AGE_SECS
-        {
-            return (
-                entry.size,
-                entry.allocated_size.unwrap_or(0),
-                entry.newest_mtime,
-            );
+        if let Some(measurement) = self.cached_measurement(path, now, mtime, listing) {
+            return measurement;
         }
 
-        let (size, allocated_size, newest_mtime) = crate::util::dir_measure_full(path);
+        let (pending, leader) = if let Ok(mut in_flight) = self.in_flight.lock() {
+            if let Some(pending) = in_flight.get(path) {
+                (Arc::clone(pending), false)
+            } else {
+                let pending = Arc::new(PendingMeasurement {
+                    result: Mutex::new(None),
+                    ready: Condvar::new(),
+                });
+                in_flight.insert(path.to_path_buf(), Arc::clone(&pending));
+                (pending, true)
+            }
+        } else {
+            // Poisoning must degrade to duplicate work, never make a scanner
+            // silently report zero bytes.
+            return crate::util::dir_measure_full(path);
+        };
+
+        if !leader {
+            let Ok(mut result) = pending.result.lock() else {
+                return crate::util::dir_measure_full(path);
+            };
+            loop {
+                if let Some(measurement) = *result {
+                    return measurement;
+                }
+                let Ok(next) = pending.ready.wait(result) else {
+                    return crate::util::dir_measure_full(path);
+                };
+                result = next;
+            }
+        }
+
+        // Another caller may have completed between our first cache check and
+        // registration. Recheck after becoming leader so that narrow race does
+        // not launch a second identical traversal.
+        if let Some(measurement) = self.cached_measurement(path, now, mtime, listing) {
+            self.complete_pending(path, &pending, measurement);
+            return measurement;
+        }
+
+        let measurement @ (size, allocated_size, newest_mtime) =
+            crate::util::dir_measure_full(path);
         if let Some(mtime) = mtime
             && let Ok(mut entries) = self.entries.lock()
         {
@@ -187,7 +276,8 @@ impl SizeCache {
                 *dirty = true;
             }
         }
-        (size, allocated_size, newest_mtime)
+        self.complete_pending(path, &pending, measurement);
+        measurement
     }
 
     /// Drop an entry whose directory we just deleted.
@@ -208,12 +298,13 @@ impl SizeCache {
         let Ok(entries) = self.entries.lock() else {
             return;
         };
-        // Entries for directories that no longer exist would grow without bound.
-        let live: HashMap<&PathBuf, &Entry> = entries.iter().filter(|(p, _)| p.exists()).collect();
+        // Loading drops every entry too old to be reused, so the persisted map
+        // is already bounded. Avoid thousands of serial `exists` syscalls here:
+        // deleted paths are harmless and disappear on the next load.
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_vec(&live) {
+        if let Ok(json) = serde_json::to_vec(&*entries) {
             let _ = std::fs::write(path, json);
         }
     }
@@ -327,6 +418,36 @@ mod tests {
         );
 
         assert_eq!(cache.size_of(&target), 4096, "must not trust the old shape");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn concurrent_misses_share_one_completed_measurement() {
+        let root = scratch("concurrent");
+        let target = root.join("artifacts");
+        std::fs::create_dir_all(&target).unwrap();
+        for index in 0..100 {
+            std::fs::write(target.join(format!("{index}.bin")), vec![0u8; 1024]).unwrap();
+        }
+
+        let cache = Arc::new(SizeCache::load(true));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let barrier = Arc::clone(&barrier);
+                let target = target.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cache.size_of(&target)
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), 100 * 1024);
+        }
+        assert!(cache.in_flight.lock().unwrap().is_empty());
 
         std::fs::remove_dir_all(&root).ok();
     }

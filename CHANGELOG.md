@@ -14,6 +14,20 @@ on each tag are the generated list of pull requests.
 
 ### Fixed
 
+- **The interface is responsive immediately again.** Storage topology and
+  post-scan pool assessment no longer block the first frame, capacity-only
+  output no longer invokes macOS `diskutil`, and disk identity is resolved once
+  per mounted volume. On the machine that exposed the regression, median first
+  frame latency fell from 777 ms in v2.2.0 to 9 ms.
+- **Warm scans avoid repeated filesystem work.** Concurrent scanners coalesce
+  exact-path cache misses, close the registration race before measuring, discard
+  unusable cache records at load, and no longer `stat` every cached path while
+  shutting down. Agent activity remains an independent, fail-closed check, so a
+  partial or unreadable history tree is never treated as inactive.
+- **Large result sets no longer do quadratic accounting every frame.** Nested
+  footprint and selection totals are computed in O(n log n), with derived totals
+  retained until the item model changes instead of rebuilt for every number the
+  interface draws.
 - **Destructive Git actions are race-safe.** Branch deletion pins the scanned
   branch OID and its exact recoverability ref/tip, rechecks the proof, and
   verifies both refs in one atomic `git update-ref` transaction. Worktree
