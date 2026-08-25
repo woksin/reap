@@ -14,38 +14,37 @@ use crate::model::Candidate;
 /// their reported size.
 pub fn exclusive_sizes(items: &[Candidate]) -> Vec<u64> {
     let mut out: Vec<u64> = items.iter().map(|item| item.size).collect();
-    let paths: Vec<_> = items
+    let mut paths: Vec<_> = items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| item.footprint.as_deref().map(|path| (index, path)))
         .collect();
+    // Parents sort before descendants, while the original index keeps the
+    // first of duplicate footprints as their owner. A stack then finds each
+    // row's nearest parent in one pass instead of comparing every pair.
+    paths.sort_unstable_by(|(left_index, left_path), (right_index, right_path)| {
+        left_path.cmp(right_path).then(left_index.cmp(right_index))
+    });
 
-    for (child_index, child_path) in &paths {
-        // Exact duplicate footprints can arise when two rule sets recognise
-        // the same directory. Keep the first as owner and do not assign the
-        // duplicate to the common parent a second time.
-        if paths
-            .iter()
-            .any(|(other_index, other_path)| other_index < child_index && other_path == child_path)
+    let mut ancestors: Vec<(usize, &std::path::Path)> = Vec::new();
+    for (child_index, child_path) in paths {
+        if ancestors
+            .last()
+            .is_some_and(|(_, owner_path)| *owner_path == child_path)
         {
-            out[*child_index] = 0;
+            out[child_index] = 0;
             continue;
         }
-
-        // The deepest containing candidate is the immediate parent in the
-        // finding hierarchy. Subtract the child's full measured size there;
-        // its own descendants will in turn be partitioned from the child.
-        let parent = paths
-            .iter()
-            .filter(|(parent_index, parent_path)| {
-                parent_index != child_index
-                    && parent_path != child_path
-                    && child_path.starts_with(parent_path)
-            })
-            .max_by_key(|(_, parent_path)| parent_path.components().count());
-        if let Some((parent_index, _)) = parent {
-            out[*parent_index] = out[*parent_index].saturating_sub(items[*child_index].size);
+        while ancestors
+            .last()
+            .is_some_and(|(_, parent_path)| !child_path.starts_with(parent_path))
+        {
+            ancestors.pop();
         }
+        if let Some((parent_index, _)) = ancestors.last() {
+            out[*parent_index] = out[*parent_index].saturating_sub(items[child_index].size);
+        }
+        ancestors.push((child_index, child_path));
     }
 
     out
@@ -55,20 +54,36 @@ pub fn exclusive_sizes(items: &[Candidate]) -> Vec<u64> {
 /// covering descendants. Non-path resources are independent and are summed.
 pub fn selection_size<'a>(items: impl IntoIterator<Item = &'a Candidate>) -> u64 {
     let selected: Vec<&Candidate> = items.into_iter().collect();
-    selected
+    let mut total = selected
+        .iter()
+        .filter(|item| item.footprint.is_none())
+        .map(|item| item.size)
+        .sum::<u64>();
+    let mut paths: Vec<_> = selected
         .iter()
         .enumerate()
-        .filter(|(idx, item)| match item.footprint.as_deref() {
-            Some(path) => !selected.iter().enumerate().any(|(other_idx, other)| {
-                other.footprint.as_deref().is_some_and(|parent| {
-                    (other_idx < *idx && parent == path)
-                        || (other_idx != *idx && parent != path && path.starts_with(parent))
-                })
-            }),
-            None => true,
+        .filter_map(|(index, item)| {
+            item.footprint
+                .as_deref()
+                .map(|path| (index, path, item.size))
         })
-        .map(|(_, item)| item.size)
-        .sum()
+        .collect();
+    paths.sort_unstable_by(|(left_index, left_path, _), (right_index, right_path, _)| {
+        left_path.cmp(right_path).then(left_index.cmp(right_index))
+    });
+
+    // Lexical path order keeps every descendant directly after its selected
+    // top-most owner. Remembering that owner is enough to skip the entire
+    // covered subtree, including duplicate rows, in one pass.
+    let mut owner: Option<&std::path::Path> = None;
+    for (_, path, size) in paths {
+        if owner.is_some_and(|owner| path == owner || path.starts_with(owner)) {
+            continue;
+        }
+        total = total.saturating_add(size);
+        owner = Some(path);
+    }
+    total
 }
 
 #[cfg(test)]
@@ -110,14 +125,26 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_footprints_keep_the_first_owner_and_still_partition_children() {
+        let items = vec![
+            path("duplicate", "/repo", 100),
+            path("owner", "/repo", 100),
+            path("child", "/repo/build", 40),
+        ];
+        assert_eq!(exclusive_sizes(&items), [60, 0, 40]);
+    }
+
+    #[test]
     fn selecting_a_parent_and_child_promises_the_parent_once() {
         let mut items = vec![
             path("worktree", "/repo/worktree", 100),
+            path("duplicate", "/repo/worktree", 70),
             path("modules", "/repo/worktree/node_modules", 60),
+            path("sibling", "/repo/other", 20),
         ];
         for item in &mut items {
             item.selected = true;
         }
-        assert_eq!(selection_size(items.iter()), 100);
+        assert_eq!(selection_size(items.iter()), 120);
     }
 }

@@ -296,7 +296,6 @@ pub fn builtin_rules() -> Vec<AgentRule> {
 
 pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     let _ = tx.send(ScanEvent::Status("scanning coding agents".into()));
-
     // A path this machine does not have is a rule that does not apply, which is
     // how one table covers every tool without asking which are installed.
     let present: Vec<(&AgentRule, PathBuf)> = opts
@@ -310,7 +309,7 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     present
         .par_iter()
         .for_each_with(tx.clone(), |tx, (rule, path)| {
-            let size = opts.cache.size_of(path);
+            let (size, _) = opts.cache.measure(path);
             if size < opts.min_size {
                 return;
             }
@@ -364,7 +363,7 @@ pub fn per_project(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEve
         return;
     }
     stores.par_iter().for_each_with(tx.clone(), |tx, path| {
-        let size = opts.cache.size_of(path);
+        let (size, _) = opts.cache.measure(path);
         if size < opts.min_size {
             return;
         }
@@ -437,7 +436,7 @@ pub fn by_month(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>
     months
         .par_iter()
         .for_each_with(tx.clone(), |tx, (when, path)| {
-            let size = opts.cache.size_of(path);
+            let (size, _) = opts.cache.measure(path);
             if size < opts.min_size {
                 return;
             }
@@ -471,7 +470,7 @@ pub fn by_month(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>
 /// is a fact about reap, and the disk is full either way. The row says as much,
 /// so an all-or-nothing decision is not mistaken for a considered one.
 fn whole_store(tool: &str, root: &Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
-    let size = opts.cache.size_of(root);
+    let (size, _) = opts.cache.measure(root);
     if size < opts.min_size {
         return;
     }
@@ -523,6 +522,9 @@ const SETTLED_AFTER_SECS: u64 = 24 * 60 * 60;
 /// as inactivity. A live tree is returned as `Active`, visible for accounting
 /// but without a selectable action.
 fn activity(path: &Path) -> Option<(u64, Eligibility)> {
+    // This independent fail-closed walk is deliberate. Size measurements may
+    // omit unreadable entries for accounting, but deletion eligibility may not
+    // infer inactivity from a partial traversal.
     let newest = crate::util::newest_mtime(path)?;
     let idle = now_secs().saturating_sub(newest);
     let eligibility = if idle < SETTLED_AFTER_SECS {
@@ -701,6 +703,16 @@ mod tests {
         };
         let parts: Vec<&str> = slug.split('-').collect();
         descend(root, &parts, &mut search)
+    }
+
+    #[test]
+    fn a_warm_size_hit_cannot_hide_a_resumed_nested_session() {
+        let root = tree("resumed", &["project/session"]);
+        std::fs::write(root.join("project/session/transcript.jsonl"), "active").unwrap();
+        let (_, eligibility) = activity(&root).unwrap();
+        assert_eq!(eligibility, Eligibility::Active);
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
