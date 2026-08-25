@@ -118,7 +118,7 @@ pub fn builtin() -> Vec<RecipeRule> {
         r(
             'G',
             "Git · everything it can spare",
-            "branches, worktrees, stashes, repacking · never an unpushed commit",
+            "branches, worktrees and repacking · protected stashes stay manual",
             RiskName::Rebuildable,
             &["git/*"],
         ),

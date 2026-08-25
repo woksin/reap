@@ -14,6 +14,20 @@ on each tag are the generated list of pull requests.
 
 ### Fixed
 
+- **Destructive Git actions are race-safe.** Branch deletion pins the scanned
+  branch OID and its exact recoverability ref/tip, rechecks the proof, and
+  verifies both refs in one atomic `git update-ref` transaction. Worktree
+  removal rechecks HEAD, status, live cwd use and detached-ref reachability.
+  Stashes remain visible but protected/manual because Git exposes arbitrary
+  stash deletion only through mutable reflog positions.
+- **Reclaim totals no longer count nested or cross-state bytes twice.** A
+  worktree and its generated artifacts, recent cache parents and stale package
+  children, root aliases, and Docker images with multiple tags are partitioned
+  into unique footprints before UI, JSON, list and execution totals are built.
+- **Free-space projections are storage-pool safe.** Candidate and inventory
+  rows are attributed from their actual filesystem footprints, APFS volumes
+  aggregate by container, Unix filesystems by device, and pathless Docker or
+  multi-pool selections suppress combined host projections.
 - **A checkout is no longer offered as a cache.** The unnamed cache sweep
   reported anything large it did not recognise as "rebuilt by the owning app",
   at the rebuildable tier — which a quick recipe takes without a typed
@@ -32,6 +46,20 @@ on each tag are the generated list of pull requests.
 
 ### Added
 
+- **A read-only disk usage catalogue.** reap now explains occupied space as
+  host-allocated inventory without giving ordinary source, application data or
+  unknown bytes a delete action. Recognised content remains visible as
+  `recent`, `active`, `protected` or `usage` even when it is not selectable,
+  with explicit catalogued and system/unclassified totals.
+- **External-volume and agent-worktree discovery.** Conventional roots and
+  direct Git checkouts on local mounted volumes are found without recursively
+  walking arbitrary drives; aliases and nested roots collapse to one scan.
+  Registered agent worktrees use generic Git safety evaluation and orphaned
+  checkout-shaped directories are surfaced as protected.
+- **Granular cache and Docker accounting.** NuGet packages and JetBrains product
+  caches can age independently of recently touched parent stores. Docker shows
+  active and recent resources separately, groups image tags by image ID, and
+  keeps logical daemon bytes distinct from Docker Desktop's host allocation.
 - **A `Coding agents` category.** The tools that write the debris this project
   was built for were the one thing on the machine reap could not see: their
   data lives in dot-directories directly under `$HOME` — `~/.claude`,

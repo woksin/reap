@@ -99,6 +99,12 @@ pub struct App {
 
     /// Free and total bytes on the volume we were launched from.
     pub disk: Option<(u64, u64)>,
+    /// Whether every configured root reports the same free-space pool. Several
+    /// APFS volumes may legitimately share one pool; a genuinely separate disk
+    /// must not have its reclaim estimate added to this header's free figure.
+    pub single_space_pool: bool,
+    /// Every non-empty reclaimable row has a host path in that same pool.
+    pub projection_safe: bool,
 
     /// The user's configuration, and where it lives, so `x` can persist.
     pub config: crate::config::Config,
@@ -133,6 +139,26 @@ pub struct App {
     pub quit: bool,
 }
 
+fn storage_topology(opts: &ScanOpts) -> (Option<(u64, u64)>, bool) {
+    let current = std::env::current_dir()
+        .ok()
+        .and_then(|directory| crate::util::disk_stat(&directory));
+    let disk = current.as_ref().map(|stat| (stat.free, stat.total));
+    let mut probes = opts.roots.clone();
+    if let Some(home) = scan::home_dir() {
+        probes.push(home);
+    }
+    if !opts.skip_inventory {
+        probes.extend(scan::local_mount_roots());
+    }
+    let single_space_pool = current.as_ref().is_some_and(|current| {
+        probes
+            .iter()
+            .all(|path| crate::util::disk_stat(path).is_some_and(|stat| stat.shares_pool(current)))
+    });
+    (disk, single_space_pool)
+}
+
 impl App {
     pub fn new(
         opts: ScanOpts,
@@ -141,6 +167,7 @@ impl App {
         config: crate::config::Config,
         config_path: std::path::PathBuf,
     ) -> Self {
+        let (disk, single_space_pool) = storage_topology(&opts);
         let mut app = Self {
             items: Vec::new(),
             nodes: Vec::new(),
@@ -164,9 +191,9 @@ impl App {
             trashed: Vec::new(),
             disk_before: None,
             disk_after: None,
-            disk: std::env::current_dir()
-                .ok()
-                .and_then(|d| crate::util::disk_free(&d)),
+            disk,
+            single_space_pool,
+            projection_safe: false,
             recipes: crate::recipes::compile(&config),
             recipe_idx: 0,
             settings: None,
@@ -196,11 +223,15 @@ impl App {
     }
 
     pub fn rescan(&mut self) {
+        let (disk, single_space_pool) = storage_topology(&self.opts);
+        self.disk = disk;
+        self.single_space_pool = single_space_pool;
         self.items.clear();
         self.reap_log.clear();
         self.freed = 0;
         self.pending = Category::ALL.into_iter().collect();
         self.status = "scanning".into();
+        self.projection_safe = false;
         let (tx, rx) = channel();
         self.scan_rx = Some(rx);
         scan::spawn_all(self.opts.clone(), tx);
@@ -209,6 +240,36 @@ impl App {
 
     pub fn scanning(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn sources_share_current_pool<'a>(candidates: impl Iterator<Item = &'a Candidate>) -> bool {
+        let Some(current) = std::env::current_dir()
+            .ok()
+            .and_then(|directory| crate::util::disk_stat(&directory))
+        else {
+            return false;
+        };
+        candidates.filter(|item| item.size > 0).all(|item| {
+            item.footprint.as_deref().is_some_and(|path| {
+                crate::util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current))
+            })
+        })
+    }
+
+    fn reclaimable_sources_share_pool(&self) -> bool {
+        Self::sources_share_current_pool(self.items.iter().filter(|item| item.selectable()))
+    }
+
+    fn inventory_sources_share_pool(&self) -> bool {
+        Self::sources_share_current_pool(
+            self.items
+                .iter()
+                .filter(|item| item.eligibility == crate::model::Eligibility::Informational),
+        )
+    }
+
+    pub fn selected_projection_safe(&self) -> bool {
+        Self::sources_share_current_pool(self.selected())
     }
 
     /// Drain both worker channels. Returns true when something changed.
@@ -247,7 +308,9 @@ impl App {
                     Err(_) => break,
                 }
             }
-            if !self.scanning() {
+            if !self.scanning() && self.status != "scan complete" {
+                self.single_space_pool = self.inventory_sources_share_pool();
+                self.projection_safe = self.reclaimable_sources_share_pool();
                 self.status = "scan complete".into();
             }
         }
@@ -341,11 +404,15 @@ impl App {
                 Some(Node::Group(c, g)) => item.category == *c && &item.group == g,
                 Some(Node::All) | None => true,
             })
-            .filter(|(_, item)| self.risk_filter.is_none_or(|r| item.risk == r))
+            .filter(|(_, item)| {
+                self.risk_filter
+                    .is_none_or(|risk| item.selectable() && item.risk == risk)
+            })
             .filter(|(_, item)| {
                 needle.is_empty()
                     || item.label.to_lowercase().contains(&needle)
                     || item.detail.to_lowercase().contains(&needle)
+                    || item.eligibility.label().contains(&needle)
             })
             .map(|(i, _)| i)
             .collect();
@@ -373,21 +440,83 @@ impl App {
 
     // ---- derived totals -------------------------------------------------
 
-    pub fn total_size(&self) -> u64 {
-        self.items.iter().map(|i| i.size).sum()
+    fn assessed_sizes(&self) -> (Vec<Candidate>, Vec<u64>) {
+        let assessed: Vec<_> = self
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.eligibility,
+                    crate::model::Eligibility::Reclaimable | crate::model::Eligibility::Recent
+                )
+            })
+            .cloned()
+            .collect();
+        let sizes = crate::accounting::exclusive_sizes(&assessed);
+        (assessed, sizes)
     }
 
-    /// Total bytes carried by every candidate at a given risk level.
-    pub fn risk_size(&self, risk: Risk) -> u64 {
+    pub fn total_size(&self) -> u64 {
+        let (assessed, sizes) = self.assessed_sizes();
+        assessed
+            .iter()
+            .zip(sizes)
+            .filter(|(item, _)| item.eligibility == crate::model::Eligibility::Reclaimable)
+            .map(|(_, size)| size)
+            .sum()
+    }
+
+    pub fn inventory_size(&self) -> u64 {
         self.items
             .iter()
-            .filter(|i| i.risk == risk)
-            .map(|i| i.size)
+            .filter(|item| item.eligibility == crate::model::Eligibility::Informational)
+            .map(|item| item.size)
+            .sum()
+    }
+
+    pub fn unclassified_size(&self) -> Option<u64> {
+        if self.scanning() || !self.single_space_pool {
+            return None;
+        }
+        let (free, total) = self.disk?;
+        Some(
+            total
+                .saturating_sub(free)
+                .saturating_sub(self.inventory_size()),
+        )
+    }
+
+    pub fn recent_size(&self) -> u64 {
+        // Partition recent and reclaimable rows together. A recent cache root
+        // can contain individually stale package children; accounting each
+        // state separately would promise the same child bytes in both totals.
+        let (assessed, exclusive) = self.assessed_sizes();
+        assessed
+            .iter()
+            .zip(exclusive)
+            .filter(|(item, _)| item.eligibility == crate::model::Eligibility::Recent)
+            .map(|(_, size)| size)
+            .sum()
+    }
+
+    /// Total unique bytes assigned to candidates at a given risk level.
+    pub fn risk_size(&self, risk: Risk) -> u64 {
+        let (assessed, exclusive) = self.assessed_sizes();
+        assessed
+            .iter()
+            .zip(exclusive)
+            .filter(|(item, _)| {
+                item.eligibility == crate::model::Eligibility::Reclaimable && item.risk == risk
+            })
+            .map(|(_, size)| size)
             .sum()
     }
 
     pub fn risk_count(&self, risk: Risk) -> usize {
-        self.items.iter().filter(|i| i.risk == risk).count()
+        self.items
+            .iter()
+            .filter(|item| item.selectable() && item.risk == risk)
+            .count()
     }
 
     pub fn selected(&self) -> impl Iterator<Item = &Candidate> {
@@ -399,7 +528,18 @@ impl App {
     }
 
     pub fn selected_size(&self) -> u64 {
-        self.selected().map(|i| i.size).sum()
+        crate::accounting::selection_size(self.selected())
+    }
+
+    pub fn selected_risk_size(&self, risk: Risk) -> u64 {
+        let selected: Vec<_> = self.selected().cloned().collect();
+        let exclusive = crate::accounting::exclusive_sizes(&selected);
+        selected
+            .iter()
+            .zip(exclusive)
+            .filter(|(item, _)| item.risk == risk)
+            .map(|(_, size)| size)
+            .sum()
     }
 
     pub fn has_irreversible(&self) -> bool {
@@ -407,10 +547,25 @@ impl App {
     }
 
     pub fn category_size(&self, cat: Category) -> u64 {
-        self.items
+        if cat == Category::Storage {
+            let inventory: Vec<_> = self
+                .items
+                .iter()
+                .filter(|item| item.category == cat)
+                .cloned()
+                .collect();
+            return crate::accounting::exclusive_sizes(&inventory)
+                .into_iter()
+                .sum();
+        }
+        let (assessed, exclusive) = self.assessed_sizes();
+        assessed
             .iter()
-            .filter(|i| i.category == cat)
-            .map(|i| i.size)
+            .zip(exclusive)
+            .filter(|(item, _)| {
+                item.eligibility == crate::model::Eligibility::Reclaimable && item.category == cat
+            })
+            .map(|(_, size)| size)
             .sum()
     }
 
@@ -419,10 +574,27 @@ impl App {
     }
 
     pub fn group_size(&self, cat: Category, group: &str) -> u64 {
-        self.items
+        if cat == Category::Storage {
+            let matching: Vec<_> = self
+                .items
+                .iter()
+                .filter(|item| item.category == cat && item.group == group)
+                .cloned()
+                .collect();
+            return crate::accounting::exclusive_sizes(&matching)
+                .into_iter()
+                .sum();
+        }
+        let (assessed, exclusive) = self.assessed_sizes();
+        assessed
             .iter()
-            .filter(|i| i.category == cat && i.group == group)
-            .map(|i| i.size)
+            .zip(exclusive)
+            .filter(|(item, _)| {
+                item.eligibility == crate::model::Eligibility::Reclaimable
+                    && item.category == cat
+                    && item.group == group
+            })
+            .map(|(_, size)| size)
             .sum()
     }
 
@@ -451,14 +623,16 @@ impl App {
     }
 
     pub fn toggle_current(&mut self) {
-        if let Some(&i) = self.visible.get(self.item_idx) {
+        if let Some(&i) = self.visible.get(self.item_idx)
+            && self.items[i].selectable()
+        {
             self.items[i].selected = !self.items[i].selected;
         }
     }
 
     pub fn set_all_visible(&mut self, selected: bool) {
         for &i in &self.visible {
-            self.items[i].selected = selected;
+            self.items[i].selected = selected && self.items[i].selectable();
         }
     }
 
@@ -471,10 +645,12 @@ impl App {
     /// What a recipe would tick, without ticking it — so the palette can show
     /// the payoff before the key is pressed.
     pub fn recipe_yield(&self, recipe: &crate::recipes::Recipe) -> (usize, u64) {
-        self.items
+        let covered: Vec<_> = self
+            .items
             .iter()
-            .filter(|i| recipe.covers(i))
-            .fold((0, 0), |(n, bytes), i| (n + 1, bytes + i.size))
+            .filter(|item| item.selectable() && recipe.covers(item))
+            .collect();
+        (covered.len(), crate::accounting::selection_size(covered))
     }
 
     pub fn move_recipe_cursor(&mut self, delta: isize) {
@@ -505,7 +681,10 @@ impl App {
         };
         let (name, covered): (String, Vec<bool>) = (
             recipe.name.clone(),
-            self.items.iter().map(|i| recipe.covers(i)).collect(),
+            self.items
+                .iter()
+                .map(|item| item.selectable() && recipe.covers(item))
+                .collect(),
         );
 
         for (item, covered) in self.items.iter_mut().zip(covered) {
@@ -527,7 +706,7 @@ impl App {
     /// Select every item in view that is not irreversible — the "obvious wins".
     pub fn select_safe(&mut self) {
         for &i in &self.visible {
-            if self.items[i].risk != Risk::Danger {
+            if self.items[i].selectable() && self.items[i].risk != Risk::Danger {
                 self.items[i].selected = true;
             }
         }
@@ -583,7 +762,7 @@ impl App {
                     .get(lo)
                     .is_none_or(|&i| !self.items[i].selected);
                 for &i in self.visible.get(lo..=hi).unwrap_or(&[]) {
-                    self.items[i].selected = target;
+                    self.items[i].selected = target && self.items[i].selectable();
                 }
             }
         }
@@ -595,7 +774,19 @@ impl App {
             return;
         };
         match &self.items[i].action {
-            crate::model::Action::Remove(path) => {
+            crate::model::Action::None => {
+                if let Some(path) = &self.items[i].footprint {
+                    let shown = crate::util::tilde(path);
+                    match reveal(path) {
+                        Ok(_) => self.status = format!("revealed {shown}"),
+                        Err(e) => self.status = format!("could not reveal {shown}: {e}"),
+                    }
+                } else {
+                    self.status = self.items[i].detail.clone();
+                }
+            }
+            crate::model::Action::Remove(path)
+            | crate::model::Action::GitWorktreeRemove { path, .. } => {
                 let shown = crate::util::tilde(path);
                 match reveal(path) {
                     Ok(_) => self.status = format!("revealed {shown}"),
@@ -603,7 +794,7 @@ impl App {
                 }
             }
             // Nothing on disk to point at for a command candidate.
-            crate::model::Action::Run { .. } => {
+            crate::model::Action::GitBranchDelete { .. } | crate::model::Action::Run { .. } => {
                 self.status = self.items[i].action.describe();
             }
         }
@@ -618,13 +809,24 @@ impl App {
         let Some(&i) = self.visible.get(self.item_idx) else {
             return;
         };
+        if self.items[i].eligibility == crate::model::Eligibility::Informational {
+            self.status = "disk-usage rows are read-only accounting and remain visible".into();
+            return;
+        }
         let pattern = match &self.items[i].action {
-            crate::model::Action::Remove(path) => crate::util::tilde(path),
-            crate::model::Action::Run { .. } => format!(
-                "{}/{}",
-                self.items[i].category.title().to_lowercase(),
-                self.items[i].group
-            ),
+            crate::model::Action::None => self.items[i]
+                .footprint
+                .as_deref()
+                .map_or_else(|| self.items[i].label.clone(), crate::util::tilde),
+            crate::model::Action::Remove(path)
+            | crate::model::Action::GitWorktreeRemove { path, .. } => crate::util::tilde(path),
+            crate::model::Action::GitBranchDelete { .. } | crate::model::Action::Run { .. } => {
+                format!(
+                    "{}/{}",
+                    self.items[i].category.title().to_lowercase(),
+                    self.items[i].group
+                )
+            }
         };
 
         if !self.config.add_ignore(pattern.clone()) {
@@ -659,7 +861,18 @@ impl App {
             settings.changed = false;
             // The one thing about this screen that is not visible on it. Where
             // the file lives is already along the bottom edge.
-            settings.status = "every change is written as you make it".into();
+            let roots = self
+                .opts
+                .roots
+                .iter()
+                .map(|path| crate::util::tilde(path))
+                .collect::<Vec<_>>()
+                .join(", ");
+            settings.status = if roots.is_empty() {
+                "no repository roots found · add one under Where to look".into()
+            } else {
+                format!("effective roots: {roots}")
+            };
         }
         self.mode = Mode::Settings;
     }

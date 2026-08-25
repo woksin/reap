@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub scan: ScanSection,
 
-    /// Candidates never to offer. Matched against the path, the label, and
-    /// `category/group`.
+    /// Deletion candidates never to offer. Matched against the path, label and
+    /// `category/group`; read-only inventory remains visible.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignore: Vec<String>,
 
@@ -74,6 +74,9 @@ pub struct ScanSection {
     pub downloads_floor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<bool>,
+    /// Read-only top-level disk catalogue. It never creates deletion actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -404,9 +407,10 @@ never_descend = [
 # Scanning
 # ---------------------------------------------------------------------------
 [scan]
-# Where to look. Defaults to the usual suspects under $HOME:
+# Where to look. Defaults to the usual suspects under $HOME, those exact
+# directory names below local mounted volumes, and direct child Git checkouts:
 # repos, src, Developer, Projects, code, dev, work, git.
-# roots = ["~/work", "~/oss"]
+# roots = ["~/work", "~/oss", "/Volumes/sourcecode/repos"]
 
 # stale_days = 30                # minimum age where reap can measure one
 # min_size = "1MB"               # hide anything smaller
@@ -414,6 +418,7 @@ never_descend = [
 # library_cache_floor = "200MB"  # floor for unnamed application caches
 # downloads_floor = "100MB"      # floor for entries in your download directory
 # trash = false                  # trash path removals; commands are unchanged
+# inventory = true               # read-only occupied-space catalogue
 # docker = true                  # set false to skip the Docker scan
 # caches = true                  # set false to skip the cache scan
 

@@ -1,7 +1,7 @@
 use super::ScanOpts;
 use crate::config::{ArtifactRule, RiskName};
 use crate::model::{Action, Candidate, Category, ScanEvent};
-use crate::util::{age_days, human_age, tilde};
+use crate::util::{days_since, human_age, tilde};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -217,6 +217,28 @@ struct Hit {
     rule: usize,
 }
 
+/// Whether a path is a generated directory recognised by the same rules the
+/// artifact scanner uses. Git worktree triage calls this for ignored entries so
+/// a `node_modules` does not make an otherwise clean checkout irreversible while
+/// an unknown ignored secret still does.
+pub fn recognised_path(path: &Path, rules: &[ArtifactRule]) -> bool {
+    let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    let siblings: HashSet<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    match_rule(rules, &name, &siblings).is_some()
+}
+
 pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     let rules = &opts.rules.artifacts;
     let mut hits = Vec::new();
@@ -243,11 +265,11 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     // each directory finishes.
     hits.par_iter().for_each_with(tx.clone(), |tx, hit| {
         let rule = &rules[hit.rule];
-        let size = opts.cache.size_of(&hit.path);
+        let (size, newest_mtime) = opts.cache.measure(&hit.path);
         if size < opts.min_size {
             return;
         }
-        let age = age_days(&hit.path);
+        let age = newest_mtime.map(days_since);
         let project = hit
             .path
             .parent()

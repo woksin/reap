@@ -1,7 +1,7 @@
 use super::ScanOpts;
 use crate::config::{CacheRule, expand};
 use crate::model::{Action, Candidate, Category, ScanEvent};
-use crate::util::{age_days, path_size, tilde};
+use crate::util::{age_days, days_since, path_size, tilde};
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -126,10 +126,11 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     present
         .par_iter()
         .for_each_with(tx.clone(), |tx, (rule, path)| {
-            let size = if path.is_dir() {
-                opts.cache.size_of(path)
+            let (size, age) = if path.is_dir() {
+                let (size, newest) = opts.cache.measure(path);
+                (size, newest.map(days_since))
             } else {
-                path_size(path)
+                (path_size(path), age_days(path))
             };
             if size < opts.min_size {
                 return;
@@ -156,14 +157,69 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
                 rule.risk.into(),
                 action,
             )
-            .with_age(age_days(path));
+            .with_age(age)
+            .with_footprint(path.clone());
             super::emit(tx, opts, cand);
         });
 
     if let Some(home) = super::home_dir() {
+        granular_cache_children(&home, opts, tx);
         library_caches(&home, opts, tx);
         let named: Vec<PathBuf> = present.iter().map(|(_, path)| path.clone()).collect();
         app_data_caches(&home, &named, opts, tx);
+    }
+}
+
+/// Large shared cache roots are often touched every day even while most of
+/// their contents have not been used for months. Keep the whole-root row as an
+/// honest inventory total, and add child rows at the smallest level whose
+/// deletion has clear rebuild semantics.
+fn granular_cache_children(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let layouts = [
+        (
+            home.join(".nuget/packages"),
+            "package managers",
+            "NuGet",
+            "package and all locally cached versions · restored on demand",
+            crate::model::Risk::Caution,
+        ),
+        (
+            home.join("Library/Caches/JetBrains"),
+            "editors",
+            "JetBrains",
+            "product cache · rebuilt or fetched by JetBrains",
+            crate::model::Risk::Caution,
+        ),
+    ];
+
+    for (root, group, owner, detail, risk) in layouts {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let children: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect();
+        children.par_iter().for_each_with(tx.clone(), |tx, path| {
+            let (size, newest) = opts.cache.measure(path);
+            if size < opts.min_size {
+                return;
+            }
+            let age = newest.map(days_since);
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let candidate = Candidate::new(
+                Category::Caches,
+                group,
+                format!("{owner} · {name}"),
+                format!("{} · {detail}", tilde(path)),
+                size,
+                risk,
+                Action::Remove(path.clone()),
+            )
+            .with_age(age);
+            super::emit(tx, opts, candidate);
+        });
     }
 }
 
@@ -193,7 +249,7 @@ fn app_data_caches(
     found
         .par_iter()
         .for_each_with(tx.clone(), |tx, (path, label): &(PathBuf, String)| {
-            let size = opts.cache.size_of(path);
+            let (size, newest) = opts.cache.measure(path);
             if size < opts.min_size {
                 return;
             }
@@ -206,7 +262,7 @@ fn app_data_caches(
                 crate::model::Risk::Safe,
                 Action::Remove(path.clone()),
             )
-            .with_age(age_days(path));
+            .with_age(newest.map(days_since));
             super::emit(tx, opts, cand);
         });
 }
@@ -317,7 +373,7 @@ fn library_caches(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent
     let floor = opts.min_size.max(opts.rules.library_cache_floor);
 
     entries.par_iter().for_each_with(tx.clone(), |tx, path| {
-        let size = opts.cache.size_of(path);
+        let (size, newest) = opts.cache.measure(path);
         if size < floor {
             return;
         }
@@ -335,7 +391,7 @@ fn library_caches(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent
             crate::model::Risk::Caution,
             Action::Remove(path.clone()),
         )
-        .with_age(age_days(path));
+        .with_age(newest.map(days_since));
         super::emit(tx, opts, cand);
     });
 }

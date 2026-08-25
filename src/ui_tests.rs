@@ -3,7 +3,7 @@
 //! the resulting cell buffer is inspected directly.
 
 use crate::app::{App, Mode};
-use crate::model::{Action, Candidate, Category, Risk};
+use crate::model::{Action, Candidate, Category, Eligibility, Risk};
 use crate::scan::ScanOpts;
 use crate::ui;
 use ratatui::Terminal;
@@ -19,6 +19,7 @@ fn fixture() -> App {
         stale_days: 30,
         min_size: 0,
         max_depth: 1,
+        skip_inventory: true,
         skip_docker: true,
         skip_caches: true,
         skip_agents: true,
@@ -129,7 +130,9 @@ fn the_default_view_spans_every_category() {
 #[test]
 fn header_breaks_the_total_down_by_risk() {
     let app = fixture();
-    let out = draw(&app, 110, 30);
+    // Wide enough that the conservative pool warning does not intentionally
+    // elide the end of the risk split.
+    let out = draw(&app, 140, 30);
     // 17 GB safe, 420 MB rebuildable, and a zero-byte irreversible stash.
     assert!(out.contains("17.0 GB safe"), "risk split missing:\n{out}");
     assert!(
@@ -153,6 +156,10 @@ fn confirm_dialog_demands_typed_acknowledgement_for_irreversible_items() {
     let out = draw(&app, 110, 30);
     assert!(out.contains("cannot be recovered"), "no warning:\n{out}");
     assert!(out.contains("confirm (locked)"), "not gated:\n{out}");
+    assert!(
+        out.contains("projection unavailable"),
+        "pathless Docker selection must not project host free space:\n{out}"
+    );
 
     app.confirm_input = "reap".into();
     assert!(app.confirm_satisfied(), "typing the word must arm it");
@@ -174,6 +181,97 @@ fn safe_selection_skips_irreversible_items() {
         !app.has_irreversible(),
         "`s` must never pick up an irreversible item"
     );
+}
+
+#[test]
+fn recent_and_reclaimable_state_totals_partition_nested_bytes() {
+    let mut app = fixture();
+    app.items = vec![
+        Candidate::new(
+            Category::Caches,
+            "packages",
+            "recent cache root",
+            "",
+            100,
+            Risk::Caution,
+            Action::Remove(PathBuf::from("/cache")),
+        )
+        .with_eligibility(Eligibility::Recent),
+        Candidate::new(
+            Category::Caches,
+            "packages",
+            "old package",
+            "",
+            40,
+            Risk::Caution,
+            Action::Remove(PathBuf::from("/cache/old")),
+        ),
+    ];
+    app.rebuild();
+    assert_eq!(app.total_size(), 40);
+    assert_eq!(app.recent_size(), 60);
+}
+
+#[test]
+fn reclaimable_parent_and_recent_child_are_also_partitioned_once() {
+    let mut app = fixture();
+    app.items = vec![
+        Candidate::new(
+            Category::Caches,
+            "packages",
+            "old cache root",
+            "",
+            100,
+            Risk::Caution,
+            Action::Remove(PathBuf::from("/cache")),
+        ),
+        Candidate::new(
+            Category::Caches,
+            "packages",
+            "recent package",
+            "",
+            40,
+            Risk::Caution,
+            Action::Remove(PathBuf::from("/cache/recent")),
+        )
+        .with_eligibility(Eligibility::Recent),
+    ];
+    app.rebuild();
+    assert_eq!(app.total_size(), 60);
+    assert_eq!(app.recent_size(), 40);
+}
+
+#[test]
+fn read_only_inventory_cannot_be_hidden_with_the_deletion_ignore_key() {
+    let mut app = fixture();
+    app.items.push(
+        Candidate::new(
+            Category::Storage,
+            "home",
+            "Pictures",
+            "occupied data",
+            5_000_000_000,
+            Risk::Danger,
+            Action::None,
+        )
+        .with_eligibility(Eligibility::Informational),
+    );
+    app.rebuild();
+    app.set_all_visible(true);
+    assert!(
+        app.items
+            .iter()
+            .find(|item| item.label == "Pictures")
+            .is_some_and(|item| !item.selected)
+    );
+    app.item_idx = app
+        .visible
+        .iter()
+        .position(|index| app.items[*index].label == "Pictures")
+        .expect("inventory row is visible");
+    app.ignore_current();
+    assert!(app.config.ignore.is_empty());
+    assert!(app.status.contains("read-only accounting"));
 }
 
 #[test]
@@ -203,6 +301,7 @@ fn empty_state_renders_without_items() {
         stale_days: 30,
         min_size: 0,
         max_depth: 1,
+        skip_inventory: true,
         skip_docker: true,
         skip_caches: true,
         skip_agents: true,

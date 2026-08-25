@@ -1,6 +1,10 @@
 use rayon::prelude::*;
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Format a byte count in SI units, matching what macOS and `docker system df`
@@ -40,18 +44,107 @@ pub fn human(bytes: u64) -> String {
 /// `read_dir` file types do not follow symlinks, so link farms and cycles
 /// contribute nothing and cannot trap the walk.
 pub fn dir_size(path: &Path) -> u64 {
+    dir_measure(path).0
+}
+
+/// Logical bytes and newest write in one traversal. Scanners need both size
+/// and staleness evidence; walking a million-file package tree twice makes the
+/// safer timestamp prohibitively expensive.
+pub fn dir_measure(path: &Path) -> (u64, Option<u64>) {
+    let (logical, _, newest) = dir_measure_full(path);
+    (logical, newest)
+}
+
+#[derive(Default)]
+struct PhysicalTracker {
+    #[cfg(unix)]
+    hard_links: Mutex<HashSet<(u64, u64)>>,
+}
+
+impl PhysicalTracker {
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::unused_self,
+            reason = "the receiver carries the hard-link set on Unix; other platforms use file length"
+        )
+    )]
+    fn allocated(&self, metadata: &fs::Metadata) -> u64 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() > 1
+                && self
+                    .hard_links
+                    .lock()
+                    .is_ok_and(|mut seen| !seen.insert((metadata.dev(), metadata.ino())))
+            {
+                return 0;
+            }
+            metadata.blocks().saturating_mul(512)
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.len()
+        }
+    }
+}
+
+/// Logical bytes, host-allocated bytes, and newest write in one traversal.
+pub fn dir_measure_full(path: &Path) -> (u64, u64, Option<u64>) {
+    dir_measure_tracked(path, &PhysicalTracker::default())
+}
+
+fn dir_measure_tracked(path: &Path, physical: &PhysicalTracker) -> (u64, u64, Option<u64>) {
+    let modified = |metadata: &fs::Metadata| {
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+    };
+    let own = fs::symlink_metadata(path).ok();
+    let own_newest = own.as_ref().and_then(modified);
+    let own_physical = own
+        .as_ref()
+        .map_or(0, |metadata| physical.allocated(metadata));
     let Ok(rd) = fs::read_dir(path) else {
-        return 0;
+        return (0, own_physical, own_newest);
     };
     let entries: Vec<_> = rd.flatten().collect();
-    entries
+    let (logical, physical, child_newest) = entries
         .par_iter()
-        .map(|e| match e.file_type() {
-            Ok(ft) if ft.is_dir() => dir_size(&e.path()),
-            Ok(ft) if ft.is_file() => e.metadata().map_or(0, |m| m.len()),
-            _ => 0,
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dir_measure_tracked(&entry.path(), physical),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or((0, 0, None), |metadata| {
+                (
+                    metadata.len(),
+                    physical.allocated(&metadata),
+                    modified(&metadata),
+                )
+            }),
+            _ => (0, 0, None),
         })
-        .sum()
+        .reduce(
+            || (0, 0, None),
+            |(left_logical, left_physical, left_newest),
+             (right_logical, right_physical, right_newest)| {
+                (
+                    left_logical.saturating_add(right_logical),
+                    left_physical.saturating_add(right_physical),
+                    left_newest
+                        .max(right_newest)
+                        .or(left_newest)
+                        .or(right_newest),
+                )
+            },
+        );
+    (
+        logical,
+        physical.saturating_add(own_physical),
+        own_newest.max(child_newest).or(own_newest).or(child_newest),
+    )
 }
 
 /// The newest modification time anywhere under `path`, including `path` itself.
@@ -162,12 +255,61 @@ pub fn rows(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
-/// Free and total bytes on the volume holding `path`.
+#[cfg(not(windows))]
+pub(crate) struct DfLine {
+    pub filesystem: String,
+    pub total_kb: u64,
+    pub available_kb: u64,
+    pub mount: PathBuf,
+}
+
+#[cfg(not(windows))]
+pub(crate) fn parse_df_line(line: &str) -> Option<DfLine> {
+    fn take(input: &str) -> Option<(&str, &str)> {
+        let input = input.trim_start();
+        let end = input.find(char::is_whitespace).unwrap_or(input.len());
+        (!input.is_empty()).then_some((&input[..end], &input[end..]))
+    }
+
+    let (filesystem, rest) = take(line)?;
+    let (total, rest) = take(rest)?;
+    let (_, rest) = take(rest)?; // used
+    let (available, rest) = take(rest)?;
+    let (_, rest) = take(rest)?; // capacity
+    let mount = rest.trim();
+    if mount.is_empty() {
+        return None;
+    }
+    Some(DfLine {
+        filesystem: filesystem.to_string(),
+        total_kb: total.parse().ok()?,
+        available_kb: available.parse().ok()?,
+        mount: PathBuf::from(mount),
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct DiskStat {
+    pub mount: PathBuf,
+    /// Stable storage-pool identity: APFS container on macOS, filesystem
+    /// device elsewhere, drive root on Windows.
+    pub pool: String,
+    pub free: u64,
+    pub total: u64,
+}
+
+impl DiskStat {
+    pub fn shares_pool(&self, other: &Self) -> bool {
+        self.pool == other.pool
+    }
+}
+
+/// Filesystem and capacity information for the volume holding `path`.
 ///
 /// `statvfs` is not in std and this is queried a handful of times per run, so
 /// shelling out to `df` costs nothing and keeps the dependency list short.
 #[cfg(not(windows))]
-pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
+pub fn disk_stat(path: &Path) -> Option<DiskStat> {
     let out = std::process::Command::new("df")
         .arg("-Pk")
         .arg(path)
@@ -178,10 +320,55 @@ pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     // Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on
-    let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
-    let total: u64 = fields.get(1)?.parse().ok()?;
-    let available: u64 = fields.get(3)?.parse().ok()?;
-    Some((available * 1024, total * 1024))
+    let row = parse_df_line(text.lines().nth(1)?)?;
+    let mount = row.mount;
+    #[cfg(target_os = "macos")]
+    let pool = apfs_container(&mount).unwrap_or_else(|| row.filesystem.clone());
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let pool = {
+        use std::os::unix::fs::MetadataExt;
+        let device = fs::metadata(&mount).ok()?.dev();
+        format!("dev:{device}")
+    };
+    #[cfg(all(not(unix), not(windows)))]
+    let pool = row.filesystem.clone();
+    Some(DiskStat {
+        mount,
+        pool,
+        free: row.available_kb.saturating_mul(1024),
+        total: row.total_kb.saturating_mul(1024),
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_apfs_container(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("APFS Container Reference:")
+                .or_else(|| line.strip_prefix("APFS Container:"))
+        })
+        .map(|container| format!("apfs:{}", container.trim()))
+}
+
+#[cfg(target_os = "macos")]
+fn apfs_container(mount: &Path) -> Option<String> {
+    let output = std::process::Command::new("diskutil")
+        .arg("info")
+        .arg(mount)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_apfs_container(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Free and total bytes on the volume holding `path`.
+#[cfg(not(windows))]
+pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
+    let stat = disk_stat(path)?;
+    Some((stat.free, stat.total))
 }
 
 /// Free and total bytes on the volume holding `path`.
@@ -229,6 +416,19 @@ pub fn disk_free(path: &Path) -> Option<(u64, u64)> {
         )
     };
     (ok != 0).then_some((available, total))
+}
+
+#[cfg(windows)]
+pub fn disk_stat(path: &Path) -> Option<DiskStat> {
+    let (free, total) = disk_free(path)?;
+    let mount = path.ancestors().last()?.to_path_buf();
+    let pool = mount.to_string_lossy().to_lowercase();
+    Some(DiskStat {
+        mount,
+        pool,
+        free,
+        total,
+    })
 }
 
 /// Shorten a path for display, replacing the home directory with `~`.
@@ -327,9 +527,86 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
+    fn df_mount_paths_keep_embedded_whitespace() {
+        let row = parse_df_line("/dev/disk9s1 100000 25000 75000 25% /media/me/My Source Disk")
+            .expect("a df data row");
+        assert_eq!(row.filesystem, "/dev/disk9s1");
+        assert_eq!(row.total_kb, 100_000);
+        assert_eq!(row.available_kb, 75_000);
+        assert_eq!(row.mount, PathBuf::from("/media/me/My Source Disk"));
+    }
+
+    #[test]
+    fn both_diskutil_apfs_container_labels_are_understood() {
+        assert_eq!(
+            parse_apfs_container("   APFS Container Reference: disk3\n"),
+            Some("apfs:disk3".into())
+        );
+        assert_eq!(
+            parse_apfs_container("   APFS Container:            disk4\n"),
+            Some("apfs:disk4".into())
+        );
+    }
+
+    #[test]
+    fn storage_pools_are_identified_by_device_or_container_not_capacity_coincidence() {
+        let first = DiskStat {
+            mount: PathBuf::from("/first"),
+            pool: "device-a".into(),
+            free: 50,
+            total: 100,
+        };
+        let same_pool = DiskStat {
+            mount: PathBuf::from("/second"),
+            pool: "device-a".into(),
+            free: 1,
+            total: 2,
+        };
+        let coincidental_capacity = DiskStat {
+            mount: PathBuf::from("/third"),
+            pool: "device-b".into(),
+            free: 50,
+            total: 100,
+        };
+        assert!(first.shares_pool(&same_pool));
+        assert!(!first.shares_pool(&coincidental_capacity));
+    }
+
+    #[test]
     fn an_unreadable_path_reports_nothing_rather_than_a_time() {
         // Not being able to tell must never come back as "nothing was written",
         // which is the answer that would make a store look finished.
         assert_eq!(newest_mtime(Path::new("/nonexistent/reap/tree")), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn inventory_counts_hard_linked_blocks_once() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = std::env::temp_dir().join(format!("reap-hardlink-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.bin");
+        fs::write(&first, vec![0u8; 4096]).unwrap();
+        fs::hard_link(&first, root.join("second.bin")).unwrap();
+        let one_file = fs::metadata(&first).unwrap().blocks().saturating_mul(512);
+        let directory = fs::metadata(&root).unwrap().blocks().saturating_mul(512);
+        let (logical, physical, _) = dir_measure_full(&root);
+        assert_eq!(logical, 8192);
+        assert_eq!(physical, one_file + directory);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn inventory_counts_allocated_blocks_not_a_sparse_files_apparent_length() {
+        let root = std::env::temp_dir().join(format!("reap-sparse-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let sparse = fs::File::create(root.join("disk.raw")).unwrap();
+        sparse.set_len(1_000_000_000_000).unwrap();
+        assert!(dir_size(&root) >= 1_000_000_000_000);
+        assert!(dir_measure_full(&root).1 < 10_000_000);
+        fs::remove_dir_all(root).ok();
     }
 }

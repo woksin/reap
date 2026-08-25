@@ -1,7 +1,8 @@
 use super::ScanOpts;
-use crate::model::{Action, Candidate, Category, Risk, ScanEvent};
+use crate::model::{Action, BranchProof, Candidate, Category, Eligibility, Risk, ScanEvent};
 use crate::util::{days_since, tilde};
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
@@ -19,6 +20,21 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn git_objects_dir(repo: &Path) -> Option<PathBuf> {
+    let raw = git(repo, &["rev-parse", "--git-common-dir"])?;
+    let path = PathBuf::from(raw.trim());
+    let common = if path.is_absolute() {
+        path
+    } else {
+        repo.join(path)
+    };
+    Some(
+        std::fs::canonicalize(&common)
+            .unwrap_or(common)
+            .join("objects"),
+    )
+}
+
 pub fn scan(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     // Evaluating a repository means spawning a `git` process per branch, which
     // is what dominates a scan. Repositories are independent, so they run
@@ -34,6 +50,95 @@ pub fn scan(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
         stashes(repo, &name, opts, tx);
         housekeeping(repo, &name, opts, tx);
     });
+    orphaned_agent_worktrees(repos, opts, tx);
+}
+
+/// Agent tools sometimes leave a checkout directory after its Git worktree
+/// registration is gone. It is still disk usage, but without the registration
+/// reap cannot prove which command owns it or what survives removal, so it is
+/// catalogued as protected rather than deleted as an ordinary directory.
+fn orphaned_agent_worktrees(repos: &[PathBuf], opts: &ScanOpts, tx: &Sender<ScanEvent>) {
+    let mut registered = HashSet::new();
+    for repo in repos {
+        if let Some(list) = git(repo, &["worktree", "list", "--porcelain"]) {
+            registered.extend(
+                parse_worktree_list(&list)
+                    .into_iter()
+                    .filter_map(|worktree| {
+                        std::fs::canonicalize(&worktree.path)
+                            .ok()
+                            .or(Some(worktree.path))
+                    }),
+            );
+        }
+    }
+
+    let mut found = Vec::new();
+    for root in &opts.roots {
+        collect_agent_worktrees(root, 0, opts.max_depth, opts, &mut found);
+    }
+    found.sort();
+    found.dedup();
+
+    for path in found {
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if registered.contains(&canonical) || !path.join(".git").exists() {
+            continue;
+        }
+        let (size, newest) = opts.cache.measure(&path);
+        if size < opts.min_size {
+            continue;
+        }
+        let age = newest.map(days_since);
+        let candidate = Candidate::new(
+            Category::Git,
+            "orphaned agent worktrees",
+            tilde(&path),
+            "checkout-like directory is not registered with its repository · inspect manually",
+            size,
+            Risk::Danger,
+            Action::None,
+        )
+        .with_age(age)
+        .with_footprint(path)
+        .with_eligibility(Eligibility::Protected);
+        super::emit(tx, opts, candidate);
+    }
+}
+
+fn collect_agent_worktrees(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    opts: &ScanOpts,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    let is_store = dir.file_name().is_some_and(|name| name == ".worktrees")
+        || (dir.file_name().is_some_and(|name| name == "worktrees")
+            && dir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| matches!(name.to_str(), Some(".claude" | ".codex" | ".pi"))));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        if is_store {
+            out.push(path);
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !opts.rules.is_never_descend(&name) {
+            collect_agent_worktrees(&path, depth + 1, max_depth, opts, out);
+        }
+    }
 }
 
 /// The branch everything else is measured against.
@@ -55,6 +160,33 @@ fn default_branch(repo: &Path) -> String {
         .map_or_else(|| "main".into(), |s| s.trim().to_string())
 }
 
+fn resolved_branch_proof(repo: &Path, reference: &str, patches: bool) -> Option<BranchProof> {
+    let full = git(repo, &["rev-parse", "--symbolic-full-name", reference])?
+        .trim()
+        .to_string();
+    let expected_tip = git(repo, &["rev-parse", "--verify", reference])?
+        .trim()
+        .to_string();
+    if full.is_empty() || expected_tip.is_empty() {
+        return None;
+    }
+    Some(if patches {
+        BranchProof::PatchesIn {
+            reference: full,
+            expected_tip,
+        }
+    } else {
+        BranchProof::ContainsRef {
+            reference: full,
+            expected_tip,
+        }
+    })
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "branch listing, recoverability grading, proof pinning and typed action creation form one evidence pipeline"
+)]
 fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
     let default = default_branch(repo);
     let current = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -102,7 +234,7 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname:short)%09%(upstream:short)%09%(upstream:track)%09%(committerdate:unix)",
+            "--format=%(refname:short)%09%(upstream:short)%09%(upstream:track)%09%(committerdate:unix)%09%(objectname)",
             "refs/heads/",
         ],
     )
@@ -114,8 +246,10 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
         let upstream = f.next().unwrap_or("").trim().to_string();
         let track = f.next().unwrap_or("").trim().to_string();
         let committed: u64 = f.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        let expected_oid = f.next().unwrap_or("").trim().to_string();
 
         if branch.is_empty()
+            || expected_oid.is_empty()
             || branch == default
             || branch == current
             || in_worktree.contains(&branch)
@@ -128,25 +262,37 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
         let is_gone = track.contains("gone");
 
         // Only branches that are merged, orphaned or stale are worth offering.
-        if !is_merged && !is_gone && age < opts.stale_days {
-            continue;
-        }
 
         // Work out what actually survives deleting this branch, rather than
         // inferring it from the branch's name or its tracking status.
+        let survival = survives(repo, &branch, &merge_base, is_merged);
+        let proof = match &survival {
+            Survives::Merged => resolved_branch_proof(repo, &merge_base, false),
+            Survives::PatchesUpstream { .. } => resolved_branch_proof(repo, &merge_base, true),
+            Survives::OnRemote { remote, .. } => resolved_branch_proof(repo, remote, false),
+            Survives::LocalOnly { .. } | Survives::Unknown { .. } => Some(BranchProof::None),
+        };
         let Verdict {
             group,
-            detail,
+            mut detail,
             risk,
             force,
-        } = grade(
-            survives(repo, &branch, &merge_base, is_merged),
-            &merge_base,
-            &upstream,
-            is_gone,
-        );
-
-        let flag = if force { "-D" } else { "-d" };
+        } = grade(survival, &merge_base, &upstream, is_gone);
+        let (action, eligibility) = if let Some(proof) = proof {
+            (
+                Action::GitBranchDelete {
+                    repo: repo.to_path_buf(),
+                    branch: branch.clone(),
+                    expected_oid,
+                    proof,
+                    force,
+                },
+                Eligibility::Reclaimable,
+            )
+        } else {
+            detail.push_str(" · proof ref could not be pinned; inspect manually");
+            (Action::None, Eligibility::Protected)
+        };
         let cand = Candidate::new(
             Category::Git,
             group,
@@ -154,13 +300,10 @@ fn branches(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent
             detail,
             0,
             risk,
-            Action::Run {
-                program: "git".into(),
-                args: vec!["branch".into(), flag.into(), branch.clone()],
-                cwd: Some(repo.to_path_buf()),
-            },
+            action,
         )
-        .with_age(Some(age));
+        .with_age(Some(age))
+        .with_eligibility(eligibility);
         super::emit(tx, opts, cand);
     }
 }
@@ -322,11 +465,15 @@ fn survives(repo: &Path, branch: &str, merge_base: &str, is_merged: bool) -> Sur
         .lines()
         .next()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "a remote".into());
-        return Survives::OnRemote {
-            commits: ahead,
-            remote,
+        .filter(|s| !s.is_empty());
+        return match remote {
+            Some(remote) => Survives::OnRemote {
+                commits: ahead,
+                remote,
+            },
+            None => Survives::Unknown {
+                reason: "git could not identify the remote ref holding these commits",
+            },
         };
     }
 
@@ -380,9 +527,19 @@ fn parse_worktree_list(out: &str) -> Vec<Worktree> {
     trees
 }
 
-/// Count files Git would otherwise hide from a worktree-cleanliness check.
-fn worktree_files(path: &Path) -> Option<(usize, usize)> {
-    git(
+#[derive(Debug)]
+struct WorktreeFiles {
+    changed: usize,
+    generated_ignored: usize,
+    unknown_ignored: usize,
+    status: String,
+}
+
+/// Inspect everything `git worktree remove --force` would discard. Known build
+/// output is counted separately from ignored paths such as `.env` or a local
+/// database, which may be the only copy of real data.
+fn worktree_files(path: &Path, opts: &ScanOpts) -> Option<WorktreeFiles> {
+    let status = git(
         path,
         &[
             "status",
@@ -390,66 +547,101 @@ fn worktree_files(path: &Path) -> Option<(usize, usize)> {
             "--untracked-files=all",
             "--ignored=matching",
         ],
-    )
-    .map(|status| {
-        let mut uncommitted = 0;
-        let mut ignored = 0;
-        for line in status.lines().filter(|line| !line.trim().is_empty()) {
-            if line.starts_with("!! ") {
-                ignored += 1;
+    )?;
+    let mut files = WorktreeFiles {
+        changed: 0,
+        generated_ignored: 0,
+        unknown_ignored: 0,
+        status: status.clone(),
+    };
+    for line in status.lines().filter(|line| !line.trim().is_empty()) {
+        if let Some(relative) = line.strip_prefix("!! ") {
+            let relative = relative.trim_end_matches('/').trim_matches('"');
+            let ignored = path.join(relative);
+            if ignored.is_dir()
+                && super::artifacts::recognised_path(&ignored, &opts.rules.artifacts)
+            {
+                files.generated_ignored += 1;
             } else {
-                uncommitted += 1;
+                files.unknown_ignored += 1;
             }
+        } else {
+            files.changed += 1;
         }
-        (uncommitted, ignored)
-    })
+    }
+    Some(files)
+}
+
+/// Whether removing the checkout leaves its commits reachable. An attached
+/// branch is itself the surviving ref; "not pushed" is not "lost" here because
+/// `git worktree remove` does not delete that branch.
+fn worktree_commits_survive(repo: &Path, wt: &Worktree) -> Option<bool> {
+    if wt.branch.is_some() {
+        return Some(true);
+    }
+    let head = git(&wt.path, &["rev-parse", "HEAD"])?;
+    let refs = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains",
+            head.trim(),
+        ],
+    )?;
+    Some(refs.lines().any(|line| !line.trim().is_empty()))
+}
+
+fn worktree_age(path: &Path, newest_file: Option<u64>) -> Option<u64> {
+    let commit = git(path, &["log", "-1", "--format=%ct", "HEAD"])
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    newest_file.max(commit).map(days_since)
 }
 
 fn worktree_verdict(
     branch: &str,
-    files: Option<(usize, usize)>,
-    unpushed: Option<u64>,
+    files: Option<&WorktreeFiles>,
+    commits_survive: Option<bool>,
 ) -> (Risk, String) {
-    let (risk, detail) = match (files, unpushed) {
+    let (risk, detail) = match (files, commits_survive) {
         (None, _) => (
             Risk::Danger,
-            "git could not inspect files in this worktree".into(),
+            "git could not inspect files in this worktree".to_string(),
         ),
         (_, None) => (
             Risk::Danger,
-            "git could not verify where its commits survive".into(),
+            "git could not verify where its commits survive".to_string(),
         ),
-        (Some((0, 0)), Some(0)) => (
+        (Some(files), survives) if files.changed > 0 || files.unknown_ignored > 0 => {
+            let mut losses = Vec::new();
+            if files.changed > 0 {
+                losses.push(format!("{} uncommitted file(s)", files.changed));
+            }
+            if files.unknown_ignored > 0 {
+                losses.push(format!("{} unknown ignored", files.unknown_ignored));
+            }
+            if survives == Some(false) {
+                losses.push("detached HEAD has no surviving ref".to_string());
+            }
+            (Risk::Danger, losses.join(" · "))
+        }
+        (Some(files), Some(false)) => (
+            Risk::Danger,
+            format!(
+                "detached HEAD has no surviving ref · {} generated ignored paths",
+                files.generated_ignored
+            ),
+        ),
+        (Some(files), Some(true)) if files.generated_ignored > 0 => (
             Risk::Caution,
-            "clean, every commit is on a remote — safe to prune".into(),
+            format!(
+                "commits remain reachable · {} generated ignored paths are rebuilt",
+                files.generated_ignored
+            ),
         ),
-        (Some((0, 0)), Some(n)) => (
-            Risk::Danger,
-            format!("clean, but {n} commits exist only here"),
-        ),
-        (Some((d, 0)), Some(0)) => (
-            Risk::Danger,
-            format!("{d} uncommitted files, commits are all pushed"),
-        ),
-        (Some((d, 0)), Some(n)) => (
-            Risk::Danger,
-            format!("{d} uncommitted files and {n} unpushed commits"),
-        ),
-        (Some((0, i)), Some(0)) => (
-            Risk::Danger,
-            format!("{i} ignored files may exist only here; commits are all pushed"),
-        ),
-        (Some((0, i)), Some(n)) => (
-            Risk::Danger,
-            format!("{i} ignored files and {n} unpushed commits"),
-        ),
-        (Some((d, i)), Some(0)) => (
-            Risk::Danger,
-            format!("{d} uncommitted and {i} ignored files; commits are all pushed"),
-        ),
-        (Some((d, i)), Some(n)) => (
-            Risk::Danger,
-            format!("{d} uncommitted files, {i} ignored files and {n} unpushed commits"),
+        (Some(_), Some(true)) => (
+            Risk::Caution,
+            "clean · commits remain reachable · safe to prune and recreate".to_string(),
         ),
     };
     (risk, format!("[{branch}] {detail}"))
@@ -464,8 +656,7 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
 
     // The first entry is the main working tree; it is the repository itself.
     for wt in trees.iter().skip(1) {
-        // A locked worktree is an explicit "leave this alone" from the user.
-        if wt.locked || wt.bare {
+        if wt.bare {
             continue;
         }
 
@@ -496,54 +687,58 @@ fn worktrees(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEven
             continue;
         }
 
-        let age = crate::util::age_days(&wt.path).unwrap_or(0);
-        if age < opts.stale_days {
+        let (size, newest_file) = opts.cache.measure(&wt.path);
+        let age = worktree_age(&wt.path, newest_file).unwrap_or(0);
+        if wt.locked {
+            let candidate = Candidate::new(
+                Category::Git,
+                "protected worktrees",
+                label,
+                format!("[{branch}] explicitly locked with git worktree lock"),
+                size,
+                Risk::Danger,
+                Action::None,
+            )
+            .with_age(Some(age))
+            .with_footprint(wt.path.clone())
+            .with_eligibility(Eligibility::Protected);
+            super::emit(tx, opts, candidate);
             continue;
         }
-        let size = opts.cache.size_of(&wt.path);
 
-        // Removing a worktree deletes its working directory outright, so both
-        // uncommitted files and commits held only here are lost with it.
-        // Ignored files are still files. `git status --porcelain` hides them by
-        // default, while `git worktree remove --force` deletes them. Ask for
-        // matching ignored entries explicitly so an ignored database, secret or
-        // export cannot be described as an empty checkout.
-        let files = worktree_files(&wt.path);
-        let unpushed = match &wt.branch {
-            Some(b) => rev_count(repo, &["rev-list", "--count", b, "--not", "--remotes"]),
-            // A detached HEAD is unreachable from any ref once the worktree goes.
-            None => rev_count(
-                &wt.path,
-                &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+        let files = worktree_files(&wt.path, opts);
+        let commits_survive = worktree_commits_survive(repo, wt);
+        let (risk, detail) = worktree_verdict(&branch, files.as_ref(), commits_survive);
+        let head = git(&wt.path, &["rev-parse", "HEAD"]).map(|head| head.trim().to_string());
+
+        let (action, eligibility) = match (head, files.as_ref()) {
+            (Some(expected_head), Some(files)) => (
+                Action::GitWorktreeRemove {
+                    repo: repo.to_path_buf(),
+                    path: wt.path.clone(),
+                    expected_head,
+                    expected_status: files.status.clone(),
+                    require_surviving_ref: wt.branch.is_none() && commits_survive == Some(true),
+                    force: risk == Risk::Danger,
+                },
+                Eligibility::Reclaimable,
             ),
+            _ => (Action::None, Eligibility::Protected),
         };
 
-        let (risk, detail) = worktree_verdict(&branch, files, unpushed);
-
-        // A clean worktree should still get Git's own refusal if the scan raced
-        // with a new file. `--force` is reserved for an item already behind the
-        // irreversible confirmation.
-        let mut args = vec!["worktree".into(), "remove".into()];
-        if risk == Risk::Danger {
-            args.push("--force".into());
-        }
-        args.push(wt.path.display().to_string());
-
-        let cand = Candidate::new(
+        let candidate = Candidate::new(
             Category::Git,
             "stale worktrees",
             label,
             detail,
             size,
             risk,
-            Action::Run {
-                program: "git".into(),
-                args,
-                cwd: Some(repo.to_path_buf()),
-            },
+            action,
         )
-        .with_age(Some(age));
-        super::emit(tx, opts, cand);
+        .with_age(Some(age))
+        .with_footprint(wt.path.clone())
+        .with_eligibility(eligibility);
+        super::emit(tx, opts, candidate);
     }
 }
 
@@ -560,25 +755,20 @@ fn stashes(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanEvent>
             continue;
         }
         let age = days_since(ts);
-        if age < opts.stale_days {
-            continue;
-        }
-        // Stashes are dropped by index, so removing one shifts the rest. Always
-        // target the ref by name and let the reaper run them one at a time.
+        // Stash selectors are mutable reflog positions. Git has no atomic
+        // compare-and-drop operation for an arbitrary entry, so reap keeps the
+        // evidence visible but refuses to automate a potentially wrong delete.
         let cand = Candidate::new(
             Category::Git,
-            "old stashes",
+            "protected stashes",
             format!("{repo_name}: {reflog}"),
-            subject,
+            format!("{subject} · mutable stash position; inspect and drop manually"),
             0,
             Risk::Danger,
-            Action::Run {
-                program: "git".into(),
-                args: vec!["stash".into(), "drop".into(), reflog.clone()],
-                cwd: Some(repo.to_path_buf()),
-            },
+            Action::None,
         )
-        .with_age(Some(age));
+        .with_age(Some(age))
+        .with_eligibility(Eligibility::Protected);
         super::emit(tx, opts, cand);
     }
 }
@@ -612,7 +802,7 @@ fn housekeeping(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanE
     // Deliberately not `--prune=now`: reap also offers to delete branches, and
     // pruning immediately would destroy the reflog that makes those recoverable.
     // The default two-week grace period keeps that safety net intact.
-    let cand = Candidate::new(
+    let candidate = Candidate::new(
         Category::Git,
         "repacking",
         format!("{repo_name}: git gc"),
@@ -625,5 +815,9 @@ fn housekeeping(repo: &Path, repo_name: &str, opts: &ScanOpts, tx: &Sender<ScanE
             cwd: Some(repo.to_path_buf()),
         },
     );
-    super::emit(tx, opts, cand);
+    let candidate = match git_objects_dir(repo) {
+        Some(path) => candidate.with_footprint(path),
+        None => candidate,
+    };
+    super::emit(tx, opts, candidate);
 }

@@ -370,6 +370,14 @@ const BUILTIN: &[BuiltinCache] = &[
         &[],
     ),
     (
+        "~/Library/Caches/JetBrains",
+        "editors",
+        "JetBrains caches",
+        "indexes and downloaded toolbox data, rebuilt or fetched by JetBrains",
+        RiskName::Rebuildable,
+        &[],
+    ),
+    (
         "~/Library/Application Support/Code/CachedExtensionVSIXs",
         "editors",
         "VS Code extension downloads",

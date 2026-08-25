@@ -86,6 +86,7 @@ pub fn scanning_everything(roots: Vec<PathBuf>) -> crate::scan::ScanOpts {
         stale_days: 0,
         min_size: 0,
         max_depth: 8,
+        skip_inventory: true,
         skip_docker: true,
         skip_caches: true,
         skip_agents: true,

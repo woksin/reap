@@ -1,3 +1,4 @@
+mod accounting;
 mod app;
 mod cache;
 mod config;
@@ -42,7 +43,7 @@ struct Cli {
     command: Option<Command>,
 
     /// Directory to scan for repositories and build artifacts. Repeatable.
-    /// Defaults to the usual suspects under $HOME.
+    /// Defaults to conventional roots under home and local mounted volumes.
     #[arg(short, long = "path", value_name = "DIR")]
     paths: Vec<PathBuf>,
 
@@ -89,6 +90,10 @@ struct Cli {
     #[arg(long)]
     yes: bool,
 
+    /// Skip the read-only disk usage catalogue.
+    #[arg(long)]
+    no_inventory: bool,
+
     /// Skip the Docker scan.
     #[arg(long)]
     no_docker: bool,
@@ -123,8 +128,8 @@ struct Cli {
     #[arg(long)]
     write_config: bool,
 
-    /// Never offer candidates matching this pattern. Repeatable, and added to
-    /// whatever the configuration file already lists.
+    /// Never offer deletion candidates matching this pattern. Read-only usage
+    /// remains visible. Repeatable; added to the configuration file's list.
     #[arg(long = "ignore", value_name = "PATTERN")]
     ignores: Vec<String>,
 }
@@ -245,7 +250,7 @@ fn main() -> Result<()> {
     } else {
         scan::default_roots()
     };
-    let roots: Vec<PathBuf> = roots.into_iter().filter(|p| p.is_dir()).collect();
+    let roots = scan::normalise_roots(roots);
 
     let min_size = cli
         .min_size
@@ -263,6 +268,7 @@ fn main() -> Result<()> {
             anyhow::anyhow!("cannot read {min_size:?} as a size — try something like 50MB")
         })?,
         max_depth: resolve(cli.depth, cfg.scan.depth, 8),
+        skip_inventory: cli.no_inventory || cfg.scan.inventory == Some(false),
         skip_docker: cli.no_docker || cfg.scan.docker == Some(false),
         skip_caches: cli.no_caches || cfg.scan.caches == Some(false),
         skip_agents: cli.no_agents || cfg.scan.agents == Some(false),
@@ -305,7 +311,12 @@ fn main() -> Result<()> {
 /// The schema names risks and categories with the words the config and the
 /// interface use, so a script and a person are talking about the same thing.
 /// `bytes` is always present; `path` only when the action is a removal.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the JSON schema and its unique-byte, inventory and filesystem summaries are built together"
+)]
 fn json_mode(opts: ScanOpts) -> Result<()> {
+    let roots = opts.roots.clone();
     let items = app::collect_headless(opts);
 
     let entries: Vec<serde_json::Value> = items
@@ -317,40 +328,147 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
                 "label": i.label,
                 "detail": i.detail,
                 "bytes": i.size,
-                "risk": i.risk.label(),
+                "risk": if i.eligibility == model::Eligibility::Informational {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(i.risk.label().to_string())
+                },
+                "eligibility": i.eligibility.label(),
+                "selectable": i.selectable(),
                 "age_days": i.age_days,
                 "command": i.action.describe(),
             });
-            if let model::Action::Remove(path) = &i.action {
+            if let Some(path) = &i.footprint {
                 entry["path"] = serde_json::json!(path.to_string_lossy());
             }
             entry
         })
         .collect();
 
+    let assessed: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.eligibility,
+                model::Eligibility::Reclaimable | model::Eligibility::Recent
+            )
+        })
+        .cloned()
+        .collect();
+    let assessed_exclusive = accounting::exclusive_sizes(&assessed);
     let by_risk: serde_json::Value = [Risk::Safe, Risk::Caution, Risk::Danger]
         .iter()
-        .map(|r| {
-            let matching: Vec<_> = items.iter().filter(|i| i.risk == *r).collect();
+        .map(|risk| {
+            let matching: Vec<_> = assessed
+                .iter()
+                .zip(&assessed_exclusive)
+                .filter(|(item, _)| {
+                    item.eligibility == model::Eligibility::Reclaimable && item.risk == *risk
+                })
+                .collect();
             (
-                r.label().to_string(),
+                risk.label().to_string(),
                 serde_json::json!({
                     "items": matching.len(),
-                    "bytes": matching.iter().map(|i| i.size).sum::<u64>(),
+                    "bytes": matching.iter().map(|(_, bytes)| **bytes).sum::<u64>(),
                 }),
             )
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
+    let total = assessed
+        .iter()
+        .zip(&assessed_exclusive)
+        .filter(|(item, _)| item.eligibility == model::Eligibility::Reclaimable)
+        .map(|(_, bytes)| *bytes)
+        .sum::<u64>();
+    let reclaimable_items = assessed
+        .iter()
+        .filter(|item| item.eligibility == model::Eligibility::Reclaimable)
+        .count();
+
+    let mut projected: std::collections::BTreeMap<
+        String,
+        (std::collections::BTreeSet<String>, u64, u64, u64),
+    > = std::collections::BTreeMap::new();
+    let mut logical_unassigned = 0u64;
+    for (item, bytes) in assessed.iter().zip(&assessed_exclusive) {
+        if item.eligibility != model::Eligibility::Reclaimable || *bytes == 0 {
+            continue;
+        }
+        let stat = item.footprint.as_deref().and_then(util::disk_stat);
+        if let Some(stat) = stat {
+            let mount = stat.mount.display().to_string();
+            let entry = projected
+                .entry(stat.pool.clone())
+                .or_insert_with(|| (std::collections::BTreeSet::new(), stat.free, stat.total, 0));
+            entry.0.insert(mount);
+            entry.1 = entry.1.min(stat.free);
+            entry.2 = entry.2.max(stat.total);
+            entry.3 = entry.3.saturating_add(*bytes);
+        } else {
+            logical_unassigned = logical_unassigned.saturating_add(*bytes);
+        }
+    }
+    let projections: Vec<_> = projected
+        .into_iter()
+        .map(|(pool, (mounts, free, capacity, reclaimable))| {
+            serde_json::json!({
+                "pool": pool,
+                "mounts": mounts,
+                "free_bytes": free,
+                "total_bytes": capacity,
+                "reclaimable_bytes": reclaimable,
+                "projected_free_bytes": free.saturating_add(reclaimable),
+            })
+        })
+        .collect();
+
+    let catalogued = items
+        .iter()
+        .filter(|item| item.eligibility == model::Eligibility::Informational)
+        .map(|item| item.size)
+        .sum::<u64>();
+    let recent_bytes = assessed
+        .iter()
+        .zip(assessed_exclusive)
+        .filter(|(item, _)| item.eligibility == model::Eligibility::Recent)
+        .map(|(_, size)| size)
+        .sum::<u64>();
 
     let mut out = serde_json::json!({
-        "total_bytes": items.iter().map(|i| i.size).sum::<u64>(),
+        "total_bytes": total,
+        "reclaimable_bytes": total,
+        "catalogued_bytes": catalogued,
+        "recent_bytes": recent_bytes,
         "items": entries.len(),
+        "reclaimable_items": reclaimable_items,
+        "roots": roots.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+        "projected_reclaim_by_filesystem": projections,
+        "logical_reclaim_without_host_path_bytes": logical_unassigned,
         "by_risk": by_risk,
         "findings": entries,
     });
-    if let Some((free, capacity)) = util::disk_free(&std::env::current_dir()?) {
-        out["disk"] = serde_json::json!({ "free_bytes": free, "total_bytes": capacity });
+    if let Some(current) = util::disk_stat(&std::env::current_dir()?) {
+        let catalogued_in_pool = items
+            .iter()
+            .filter(|item| item.eligibility == model::Eligibility::Informational)
+            .filter_map(|item| {
+                let path = item.footprint.as_deref()?;
+                let stat = util::disk_stat(path)?;
+                stat.shares_pool(&current).then_some(item.size)
+            })
+            .sum::<u64>();
+        let used = current.total.saturating_sub(current.free);
+        out["disk"] = serde_json::json!({
+            "mount": current.mount,
+            "free_bytes": current.free,
+            "used_bytes": used,
+            "total_bytes": current.total,
+            "catalogued_bytes_in_pool": catalogued_in_pool,
+            "system_or_unclassified_bytes": used.saturating_sub(catalogued_in_pool),
+            "projection_note": "Docker logical resources may not immediately release the same number of host bytes; separate filesystems are not pooled",
+        });
     }
 
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -363,6 +481,10 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
 /// irreversible. Neither is available here, so the deliberate act is the flags
 /// themselves — `--yes` to touch anything at all, and a `--risk` that has to be
 /// raised by hand past the safe default before work can be lost.
+#[expect(
+    clippy::too_many_lines,
+    reason = "headless selection, confirmation policy, execution and reporting are one CLI transaction"
+)]
 fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Result<()> {
     let items = app::collect_headless(opts);
 
@@ -373,21 +495,32 @@ fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Re
             .find(|r| r.key == key)
             .ok_or_else(|| anyhow::anyhow!("no recipe bound to {key:?}"))?;
         (
-            items.into_iter().filter(|i| recipe.covers(i)).collect(),
+            items
+                .into_iter()
+                .filter(|item| item.selectable() && recipe.covers(item))
+                .collect(),
             recipe.name.clone(),
         )
     } else {
         let ceiling: Risk = cli.risk.unwrap_or(RiskCeiling::Safe).into();
         (
-            items.into_iter().filter(|i| i.risk <= ceiling).collect(),
+            items
+                .into_iter()
+                .filter(|item| item.selectable() && item.risk <= ceiling)
+                .collect(),
             format!("everything up to {}", ceiling.label()),
         )
     };
 
-    let total: u64 = chosen.iter().map(|i| i.size).sum();
+    let total = accounting::selection_size(chosen.iter());
+    let exclusive = accounting::exclusive_sizes(&chosen);
     println!("{} — {} items, {}", how, chosen.len(), human(total));
     for risk in [Risk::Safe, Risk::Caution, Risk::Danger] {
-        let matching: Vec<_> = chosen.iter().filter(|i| i.risk == risk).collect();
+        let matching: Vec<_> = chosen
+            .iter()
+            .zip(&exclusive)
+            .filter(|(item, _)| item.risk == risk)
+            .collect();
         if matching.is_empty() {
             continue;
         }
@@ -395,7 +528,7 @@ fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Re
             "  {} {:<14} {:>10}   {} items",
             risk.dot(),
             risk.label(),
-            human(matching.iter().map(|i| i.size).sum::<u64>()),
+            human(matching.iter().map(|(_, bytes)| **bytes).sum::<u64>()),
             matching.len()
         );
     }
@@ -466,80 +599,179 @@ fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Re
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "plain output mirrors the UI's categories, state accounting, risk summary and pool-safe projection"
+)]
 fn list_mode(opts: ScanOpts) -> Result<()> {
     let items = app::collect_headless(opts);
-    let total: u64 = items.iter().map(|i| i.size).sum();
+    let assessed: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.eligibility,
+                model::Eligibility::Reclaimable | model::Eligibility::Recent
+            )
+        })
+        .cloned()
+        .collect();
+    let assessed_bytes = accounting::exclusive_sizes(&assessed);
+    let inventory: Vec<_> = items
+        .iter()
+        .filter(|item| item.eligibility == model::Eligibility::Informational)
+        .cloned()
+        .collect();
+    let inventory_bytes = accounting::exclusive_sizes(&inventory);
 
-    for cat in Category::ALL {
-        let in_cat: Vec<_> = items.iter().filter(|i| i.category == cat).collect();
-        if in_cat.is_empty() {
+    let assessed_size =
+        |category: Category, group: Option<&str>, eligibility: model::Eligibility| {
+            assessed
+                .iter()
+                .zip(&assessed_bytes)
+                .filter(|(item, _)| {
+                    item.category == category
+                        && item.eligibility == eligibility
+                        && group.is_none_or(|group| item.group == group)
+                })
+                .map(|(_, bytes)| *bytes)
+                .sum::<u64>()
+        };
+    let usage_size = |category: Category, group: Option<&str>| {
+        inventory
+            .iter()
+            .zip(&inventory_bytes)
+            .filter(|(item, _)| {
+                item.category == category && group.is_none_or(|group| item.group == group)
+            })
+            .map(|(_, bytes)| *bytes)
+            .sum::<u64>()
+    };
+
+    for category in Category::ALL {
+        let in_category: Vec<_> = items
+            .iter()
+            .filter(|item| item.category == category)
+            .collect();
+        if in_category.is_empty() {
             continue;
         }
-        let size: u64 = in_cat.iter().map(|i| i.size).sum();
         println!(
-            "\n{} — {} ({} items)",
-            cat.title(),
-            human(size),
-            in_cat.len()
+            "\n{} — {} reclaimable · {} recent · {} usage ({} rows)",
+            category.title(),
+            human(assessed_size(
+                category,
+                None,
+                model::Eligibility::Reclaimable
+            )),
+            human(assessed_size(category, None, model::Eligibility::Recent)),
+            human(usage_size(category, None)),
+            in_category.len()
         );
 
-        // Group headings carry the reason something is reapable, which is the
-        // part worth reading when there are hundreds of entries.
-        let mut groups: Vec<&str> = in_cat.iter().map(|i| i.group.as_str()).collect();
-        groups.dedup();
-        let mut seen: Vec<&str> = Vec::new();
+        let groups: std::collections::BTreeSet<&str> =
+            in_category.iter().map(|item| item.group.as_str()).collect();
         for group in groups {
-            if seen.contains(&group) {
-                continue;
-            }
-            seen.push(group);
-            let members: Vec<_> = in_cat.iter().filter(|i| i.group == group).collect();
-            let gsize: u64 = members.iter().map(|i| i.size).sum();
+            let members: Vec<_> = in_category
+                .iter()
+                .copied()
+                .filter(|item| item.group == group)
+                .collect();
             println!(
-                "\n  {} · {} · {} items   [{}]",
+                "\n  {} · {} reclaimable · {} recent · {} usage · {} rows",
                 group,
-                human(gsize),
-                members.len(),
-                members[0].risk.label()
+                human(assessed_size(
+                    category,
+                    Some(group),
+                    model::Eligibility::Reclaimable
+                )),
+                human(assessed_size(
+                    category,
+                    Some(group),
+                    model::Eligibility::Recent
+                )),
+                human(usage_size(category, Some(group))),
+                members.len()
             );
             for item in members {
                 println!(
-                    "    {:>9}  {:<46} {}",
+                    "    {:>9}  {:<46} [{:<11}] {}",
                     if item.size == 0 {
                         "—".into()
                     } else {
                         human(item.size)
                     },
                     item.label,
+                    item.eligibility.label(),
                     item.detail
                 );
             }
         }
     }
 
+    let total = assessed
+        .iter()
+        .zip(&assessed_bytes)
+        .filter(|(item, _)| item.eligibility == model::Eligibility::Reclaimable)
+        .map(|(_, bytes)| *bytes)
+        .sum::<u64>();
+    let recent = assessed
+        .iter()
+        .zip(&assessed_bytes)
+        .filter(|(item, _)| item.eligibility == model::Eligibility::Recent)
+        .map(|(_, bytes)| *bytes)
+        .sum::<u64>();
+    let catalogued = inventory_bytes.iter().sum::<u64>();
+
     println!("\n{}", "─".repeat(72));
     for risk in [Risk::Safe, Risk::Caution, Risk::Danger] {
-        let matching: Vec<_> = items.iter().filter(|i| i.risk == risk).collect();
+        let matching: Vec<_> = assessed
+            .iter()
+            .zip(&assessed_bytes)
+            .filter(|(item, _)| {
+                item.eligibility == model::Eligibility::Reclaimable && item.risk == risk
+            })
+            .collect();
         if matching.is_empty() {
             continue;
         }
-        let size: u64 = matching.iter().map(|i| i.size).sum();
         println!(
             "  {} {:<14} {:>10}   {} items",
             risk.dot(),
             risk.label(),
-            human(size),
+            human(matching.iter().map(|(_, bytes)| **bytes).sum::<u64>()),
             matching.len()
         );
     }
-    println!("\n  Total reclaimable: {}", human(total));
-    if let Some((free, capacity)) = util::disk_free(&std::env::current_dir()?) {
-        println!(
-            "  Disk: {} free of {} — reaping everything would leave {} free",
-            human(free),
-            human(capacity),
-            human(free + total)
-        );
+    println!("\n  Reclaimable: {}", human(total));
+    println!("  Recent:      {}", human(recent));
+    println!("  Catalogued:  {}", human(catalogued));
+
+    if let Some(current) = util::disk_stat(&std::env::current_dir()?) {
+        let one_pool = assessed
+            .iter()
+            .zip(&assessed_bytes)
+            .filter(|(item, bytes)| {
+                item.eligibility == model::Eligibility::Reclaimable && **bytes > 0
+            })
+            .all(|(item, _)| {
+                item.footprint.as_deref().is_some_and(|path| {
+                    util::disk_stat(path).is_some_and(|stat| stat.shares_pool(&current))
+                })
+            });
+        if one_pool {
+            println!(
+                "  Disk: {} free of {} — reaping everything would leave ≈ {} free",
+                human(current.free),
+                human(current.total),
+                human(current.free.saturating_add(total))
+            );
+        } else {
+            println!(
+                "  Disk: {} free of {} — multiple storage pools; no combined projection",
+                human(current.free),
+                human(current.total)
+            );
+        }
     }
     if let Some(notice) = update::notice(env!("CARGO_PKG_VERSION")) {
         println!("{notice}");

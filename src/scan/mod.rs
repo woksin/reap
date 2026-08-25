@@ -4,6 +4,7 @@ pub mod cache_rules;
 pub mod caches;
 pub mod docker;
 pub mod git;
+pub mod inventory;
 pub mod personal;
 
 use crate::model::{Category, ScanEvent};
@@ -129,6 +130,7 @@ pub struct ScanOpts {
     pub min_size: u64,
     /// How deep to descend from each root.
     pub max_depth: usize,
+    pub skip_inventory: bool,
     pub skip_docker: bool,
     pub skip_caches: bool,
     pub skip_agents: bool,
@@ -150,6 +152,7 @@ impl Default for ScanOpts {
             stale_days: 30,
             min_size: 1024 * 1024, // 1 MB
             max_depth: 8,
+            skip_inventory: false,
             skip_docker: false,
             skip_caches: false,
             skip_agents: false,
@@ -160,30 +163,157 @@ impl Default for ScanOpts {
 }
 
 /// Common places developers keep checkouts. Only the ones that exist are kept.
+const COMMON_ROOT_NAMES: &[&str] = &[
+    "repos",
+    "src",
+    "Developer",
+    "Projects",
+    "projects",
+    "code",
+    "Code",
+    "dev",
+    "work",
+    "git",
+    // Where the Windows tooling puts checkouts by default: Visual Studio
+    // clones into `source/repos`, GitHub Desktop into `Documents/GitHub`.
+    "source/repos",
+    "Documents/GitHub",
+];
+
 pub fn default_roots() -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return vec![];
     };
-    [
-        "repos",
-        "src",
-        "Developer",
-        "Projects",
-        "projects",
-        "code",
-        "Code",
-        "dev",
-        "work",
-        "git",
-        // Where the Windows tooling puts checkouts by default: Visual Studio
-        // clones into `source/repos`, GitHub Desktop into `Documents/GitHub`.
-        "source/repos",
-        "Documents/GitHub",
-    ]
-    .iter()
-    .map(|d| home.join(d))
-    .filter(|p| p.is_dir())
-    .collect()
+    let mounts = local_mount_roots();
+    let mut bases = vec![home];
+    bases.extend(mounts.iter().cloned());
+    let mut roots = roots_beneath(&bases, COMMON_ROOT_NAMES);
+    for mount in mounts {
+        roots.extend(direct_repositories(&mount));
+    }
+    normalise_roots(roots)
+}
+
+fn direct_repositories(mount: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if mount.join(".git").exists() {
+        found.push(mount.to_path_buf());
+    }
+    for child in children_of(mount) {
+        let checkout = child.join(".git").exists();
+        let bare = child.join("HEAD").is_file()
+            && child.join("objects").is_dir()
+            && child.join("refs").is_dir();
+        if checkout || bare {
+            found.push(child);
+        }
+    }
+    found
+}
+
+fn roots_beneath(bases: &[PathBuf], names: &[&str]) -> Vec<PathBuf> {
+    let roots: Vec<PathBuf> = bases
+        .iter()
+        .flat_map(|base| names.iter().map(move |name| base.join(name)))
+        .filter(|path| path.is_dir())
+        .collect();
+    normalise_roots(roots)
+}
+
+/// Resolve symlink aliases and collapse nested roots so one tree is neither
+/// scanned nor catalogued twice. Shallowest first means a conventional parent
+/// such as `~/src -> /Volumes/sourcecode` covers a separately discovered
+/// `/Volumes/sourcecode/repos`.
+pub fn normalise_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut canonical: Vec<PathBuf> = roots
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+        .collect();
+    canonical.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for root in canonical {
+        if !kept.iter().any(|parent| root.starts_with(parent)) {
+            kept.push(root);
+        }
+    }
+    kept
+}
+
+/// Local mount points whose direct conventional source directories are cheap
+/// to probe. This is discovery, not traversal: reap never recursively walks
+/// `/Volumes`, `/mnt`, or every Windows drive merely because they exist.
+pub(crate) fn local_mount_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    #[cfg(target_os = "macos")]
+    roots.extend(
+        children_of(Path::new("/Volumes"))
+            .into_iter()
+            .filter(|path| is_local_mount(path)),
+    );
+    #[cfg(target_os = "linux")]
+    for base in ["/mnt", "/media", "/run/media"] {
+        for child in children_of(Path::new(base)) {
+            if is_local_mount(&child) {
+                roots.push(child);
+            } else {
+                // Desktop automounters commonly insert the user name:
+                // `/media/<user>/<volume>` and `/run/media/<user>/<volume>`.
+                roots.extend(
+                    children_of(&child)
+                        .into_iter()
+                        .filter(|path| is_local_mount(path)),
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    for letter in b'A'..=b'Z' {
+        let root = PathBuf::from(format!("{}:\\", char::from(letter)));
+        if root.is_dir() {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+#[cfg(not(windows))]
+fn is_local_mount(path: &Path) -> bool {
+    let Ok(output) = std::process::Command::new("df")
+        .arg("-P")
+        .arg(path)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(row) = text.lines().nth(1).and_then(crate::util::parse_df_line) else {
+        return false;
+    };
+    if !row.filesystem.starts_with("/dev/") {
+        return false;
+    }
+    let actual = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let reported = std::fs::canonicalize(&row.mount).unwrap_or(row.mount);
+    actual == reported
+}
+
+fn children_of(path: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .collect()
 }
 
 /// The user's home directory.
@@ -201,6 +331,16 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Kick off every scanner on its own thread so results stream into the UI.
 pub fn spawn_all(opts: ScanOpts, tx: Sender<ScanEvent>) {
+    {
+        let opts = opts.clone();
+        let tx = tx.clone();
+        thread::spawn(move || {
+            if !opts.skip_inventory {
+                inventory::scan(&opts, &tx);
+            }
+            let _ = tx.send(ScanEvent::Done(Category::Storage));
+        });
+    }
     // Git and artifacts share a repository walk, so they run on one thread and
     // report independently.
     {
@@ -383,13 +523,20 @@ const BUILTIN_NEVER_DESCEND: &[&str] = &[
 /// Every scanner goes through here, so a pattern cannot be honoured in one
 /// category and quietly missed in another.
 pub fn emit(tx: &Sender<ScanEvent>, opts: &ScanOpts, mut cand: crate::model::Candidate) {
-    // One age policy for every scanner. Keeping this at the common exit means a
-    // new category cannot accidentally display recent entries while the CLI says
-    // `--stale-days` applies to anything whose age reap can measure.
-    if cand.age_days.is_some_and(|age| age < opts.stale_days) {
-        return;
+    // Age controls eligibility, not visibility. A catalogue that hides a known
+    // 13 GB cache because it was touched yesterday cannot explain the disk.
+    // Explicitly informational/protected rows keep their stronger disposition.
+    if cand.eligibility == crate::model::Eligibility::Reclaimable
+        && cand.age_days.is_some_and(|age| age < opts.stale_days)
+    {
+        cand.eligibility = crate::model::Eligibility::Recent;
     }
-    if opts.rules.ignore.matches_candidate(&cand) {
+    // `ignore` means never offer a deletion decision. Read-only inventory is
+    // not an offer and must remain able to explain those bytes; otherwise
+    // ignoring a cache would make it vanish from the disk catalogue too.
+    if cand.eligibility != crate::model::Eligibility::Informational
+        && opts.rules.ignore.matches_candidate(&cand)
+    {
         return;
     }
     // Re-graded here rather than in each scanner, for the same reason ignoring
@@ -566,8 +713,36 @@ mod tests {
     }
 
     #[test]
-    fn emit_drops_recent_candidates_but_keeps_old_and_ageless_ones() {
-        use crate::model::{Action, Candidate, Category, Risk};
+    fn ignored_deletion_paths_still_exist_in_read_only_inventory() {
+        use crate::model::{Action, Candidate, Category, Eligibility, Risk};
+        use std::sync::mpsc::channel;
+
+        let mut config = Config::default();
+        config.ignore.push("/work/project/cache".into());
+        let opts = ScanOpts {
+            rules: std::sync::Arc::new(Rules::from_config(&config)),
+            ..Default::default()
+        };
+        let inventory = Candidate::new(
+            Category::Storage,
+            "usage",
+            "cache",
+            "",
+            10,
+            Risk::Danger,
+            Action::None,
+        )
+        .with_footprint(PathBuf::from("/work/project/cache"))
+        .with_eligibility(Eligibility::Informational);
+        let (tx, rx) = channel();
+        emit(&tx, &opts, inventory);
+        drop(tx);
+        assert_eq!(rx.into_iter().count(), 1);
+    }
+
+    #[test]
+    fn emit_keeps_recent_candidates_visible_but_not_reclaimable() {
+        use crate::model::{Action, Candidate, Category, Eligibility, Risk};
         use std::sync::mpsc::channel;
 
         let opts = ScanOpts {
@@ -593,14 +768,23 @@ mod tests {
         emit(&tx, &opts, make("ageless", None));
         drop(tx);
 
-        let got: Vec<String> = rx
+        let got: Vec<(String, Eligibility)> = rx
             .iter()
             .filter_map(|event| match event {
-                ScanEvent::Found(candidate) => Some(candidate.label.clone()),
+                ScanEvent::Found(candidate) => {
+                    Some((candidate.label.clone(), candidate.eligibility))
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(got, ["old", "ageless"]);
+        assert_eq!(
+            got,
+            [
+                ("recent".into(), Eligibility::Recent),
+                ("old".into(), Eligibility::Reclaimable),
+                ("ageless".into(), Eligibility::Reclaimable),
+            ]
+        );
     }
 
     #[test]
@@ -749,5 +933,36 @@ mod tests {
         assert_eq!(Rules::from_config(&cfg).library_cache_floor, 500_000_000);
         // And the default stands when unset.
         assert_eq!(Rules::default().library_cache_floor, 200_000_000);
+    }
+
+    #[test]
+    fn nested_and_aliased_roots_are_scanned_once() {
+        let base = std::env::temp_dir().join(format!("reap-root-alias-{}", std::process::id()));
+        let nested = base.join("repos");
+        std::fs::create_dir_all(&nested).unwrap();
+        let roots = normalise_roots(vec![nested, base.clone()]);
+        let canonical = std::fs::canonicalize(&base).expect("fixture root is readable");
+        assert_eq!(roots, [canonical]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_repository_directly_below_a_source_volume_is_discovered() {
+        let mount = std::env::temp_dir().join(format!("reap-direct-repo-{}", std::process::id()));
+        let repository = mount.join("reap");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        assert_eq!(direct_repositories(&mount), [repository]);
+        std::fs::remove_dir_all(mount).ok();
+    }
+
+    #[test]
+    fn conventional_roots_on_a_mounted_volume_are_discovered_without_walking_the_volume() {
+        let base = std::env::temp_dir().join(format!("reap-mounted-root-{}", std::process::id()));
+        let repos = base.join("repos");
+        std::fs::create_dir_all(&repos).unwrap();
+        let roots = roots_beneath(std::slice::from_ref(&base), &["repos", "src"]);
+        let canonical_repos = std::fs::canonicalize(&repos).expect("fixture root is readable");
+        assert_eq!(roots, [canonical_repos]);
+        std::fs::remove_dir_all(base).ok();
     }
 }

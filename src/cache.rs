@@ -19,10 +19,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// How long a measurement stays trustworthy.
-const MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+// Deep rewrites need not move a candidate root's mtime or direct entry list.
+// A one-day ceiling keeps a catalogue from carrying a week-old estimate while
+// still avoiding repeated walks during an interactive session.
+const MAX_AGE_SECS: u64 = 24 * 60 * 60;
+/// Bumped whenever measurement semantics change. Version 1 deduplicates
+/// hard-linked files and directory metadata when reporting allocated bytes.
+const CACHE_ENTRY_VERSION: u8 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct Entry {
+    #[serde(default)]
+    version: u8,
     size: u64,
     mtime: u64,
     measured_at: u64,
@@ -31,6 +39,15 @@ struct Entry {
     /// vouched for, so it is measured again once and written back complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     entries: Option<u64>,
+    /// Newest write found during the same traversal as `size`. Old cache files
+    /// lack this and are deliberately measured once before scanners trust an
+    /// age derived from them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    newest_mtime: Option<u64>,
+    /// Host blocks occupied by the tree. Needed by inventory to handle sparse
+    /// virtual disks without confusing apparent and physical size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allocated_size: Option<u64>,
 }
 
 #[derive(Default)]
@@ -111,8 +128,22 @@ impl SizeCache {
 
     /// Measured size of `path`, reusing a previous measurement when it still holds.
     pub fn size_of(&self, path: &Path) -> u64 {
+        self.measure_full(path).0
+    }
+
+    /// Logical size and newest nested write from one cached traversal.
+    pub fn measure(&self, path: &Path) -> (u64, Option<u64>) {
+        let (logical, _, newest) = self.measure_full(path);
+        (logical, newest)
+    }
+
+    pub fn allocated_size(&self, path: &Path) -> u64 {
+        self.measure_full(path).1
+    }
+
+    fn measure_full(&self, path: &Path) -> (u64, u64, Option<u64>) {
         if !self.enabled {
-            return crate::util::dir_size(path);
+            return crate::util::dir_measure_full(path);
         }
         let now = crate::util::now_secs();
         let mtime = mtime_of(path);
@@ -120,33 +151,43 @@ impl SizeCache {
 
         if let Some(mtime) = mtime
             && let Ok(entries) = self.entries.lock()
-            && let Some(e) = entries.get(path)
-            && e.mtime == mtime
-            && e.entries.is_some()
-            && e.entries == listing
-            && now.saturating_sub(e.measured_at) < MAX_AGE_SECS
+            && let Some(entry) = entries.get(path)
+            && entry.version == CACHE_ENTRY_VERSION
+            && entry.mtime == mtime
+            && entry.entries.is_some()
+            && entry.entries == listing
+            && entry.newest_mtime.is_some()
+            && entry.allocated_size.is_some()
+            && now.saturating_sub(entry.measured_at) < MAX_AGE_SECS
         {
-            return e.size;
+            return (
+                entry.size,
+                entry.allocated_size.unwrap_or(0),
+                entry.newest_mtime,
+            );
         }
 
-        let size = crate::util::dir_size(path);
+        let (size, allocated_size, newest_mtime) = crate::util::dir_measure_full(path);
         if let Some(mtime) = mtime
             && let Ok(mut entries) = self.entries.lock()
         {
             entries.insert(
                 path.to_path_buf(),
                 Entry {
+                    version: CACHE_ENTRY_VERSION,
                     size,
                     mtime,
                     measured_at: now,
                     entries: listing,
+                    newest_mtime,
+                    allocated_size: Some(allocated_size),
                 },
             );
-            if let Ok(mut d) = self.dirty.lock() {
-                *d = true;
+            if let Ok(mut dirty) = self.dirty.lock() {
+                *dirty = true;
             }
         }
-        size
+        (size, allocated_size, newest_mtime)
     }
 
     /// Drop an entry whose directory we just deleted.
@@ -275,10 +316,13 @@ mod tests {
         cache.entries.lock().unwrap().insert(
             target.clone(),
             Entry {
+                version: 0,
                 size: 1,
                 mtime: mtime_of(&target).unwrap(),
                 measured_at: crate::util::now_secs(),
                 entries: None,
+                newest_mtime: None,
+                allocated_size: None,
             },
         );
 

@@ -81,10 +81,15 @@ pub const LEGEND: &[LegendGroup] = &[
         title: "In the list",
         entries: &[
             ("◉", "selected · d will reap this", Tone::Accent),
-            ("○", "not selected", Tone::Dim),
+            ("○", "selectable, not selected", Tone::Dim),
+            (
+                "·",
+                "usage, recent, active or protected · not selectable",
+                Tone::Dim,
+            ),
             (
                 "$",
-                "the command that will run, on the highlighted row",
+                "the command that will run, on a highlighted selectable row",
                 Tone::Dim,
             ),
             (
@@ -126,12 +131,14 @@ pub const GUIDE: &[Section] = &[
     Section {
         title: "What you are looking at",
         body: &[
-            "reap looks for five kinds of thing that pile up and stop being useful:",
+            "reap catalogues occupied space, then finds six kinds of thing to assess:",
             "",
+            "  Disk usage       read-only host-allocated bytes; never a delete action",
             "  Git              branches, worktrees, stashes, repacking",
             "  Build artifacts  target, node_modules, bin/obj — proven by a sibling",
             "  Docker           unused images, stopped containers, volumes, build cache",
             "  Caches           browsers, chat apps, design tools, package managers",
+            "  Coding agents    packages, logs, session history",
             "  Personal         old downloads, installers, phone backups",
             "",
             "The left pane holds those categories and their groups. The right pane is",
@@ -166,11 +173,13 @@ pub const GUIDE: &[Section] = &[
     Section {
         title: "Deciding what goes",
         body: &[
-            "Every item carries a risk, and it is the only thing worth reading carefully:",
+            "Every selectable item carries a risk; other rows explain why they are not:",
             "",
             "  ● safe           regenerated automatically — nothing is lost",
             "  ● rebuildable    costs time to rebuild or re-download — no work is lost",
             "  ▲ irreversible   may destroy work that exists nowhere else",
+            "  · recent/active   recognised bytes, visible but not selectable",
+            "  · usage           occupied bytes only, with no delete action",
             "",
             "This is the whole point. A branch whose upstream was deleted might be a",
             "squash-merged PR whose work is entirely in main, or the only copy of three",
@@ -324,7 +333,7 @@ mod tests {
             .iter()
             .flat_map(|g| g.entries.iter().map(|(s, ..)| *s))
             .collect();
-        for mark in ["●", "▲", "◉", "○", "✓", "✗"] {
+        for mark in ["●", "▲", "◉", "○", "·", "✓", "✗"] {
             assert!(symbols.contains(&mark), "the legend never explains {mark}");
         }
     }
