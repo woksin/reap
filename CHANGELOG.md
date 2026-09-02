@@ -12,6 +12,23 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
+### Changed
+
+- **reap now refuses paths it previously agreed to delete.** Two of the fixes
+  below tighten the deletion backstop: everything inside a system directory is
+  refused rather than only the directory itself, and a refusal is re-checked
+  against where a path resolves rather than only how it is spelled. Anything
+  reaching those cases was already something reap should never have offered, so
+  no ordinary scan changes — but a hand-added scan root pointing into `/usr`, or
+  a path reached through a redirected cache directory, now fails instead of
+  deleting. `--reap --yes` reports that as a non-zero exit, so an automated run
+  that relied on it will say so rather than continue quietly.
+- **Configured ignores now suppress findings they previously missed.** An ignore
+  written through a symlink, and any ignore naming a git worktree, protected
+  nothing before. Where those rules exist the affected rows disappear from the
+  list — which is what they always asked for, but it is a visible change to what
+  a run offers.
+
 ### Fixed
 
 - **Trashing two things of the same name no longer loses one of them.** Path
