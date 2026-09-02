@@ -459,7 +459,7 @@ fn execute_candidate(cand: &Candidate, opts: ReapOpts) -> Outcome {
 /// What a liveness verdict means for the run, as words.
 ///
 /// Split out so the three-way decision can be specified directly. Reaching
-/// [`Liveness::Running`] through the real process table would mean depending on
+/// [`crate::liveness::Liveness::Running`] through the real table would depend on
 /// a program being up on whatever machine the tests run on.
 fn liveness_refusal(state: crate::liveness::Liveness) -> Option<String> {
     match state {
