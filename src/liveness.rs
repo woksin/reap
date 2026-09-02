@@ -218,6 +218,27 @@ mod tests {
         );
     }
 
+    /// The one thing the tests above cannot reach: an owner that really is
+    /// running. reap deliberately excludes its own process tree, so a child
+    /// this test spawned would be filtered out by design and prove nothing.
+    /// It needs a process started outside the test's ancestry:
+    ///
+    /// ```sh
+    /// printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(300));}' > /tmp/probe.rs
+    /// rustc -o /tmp/reap-liveness-probe /tmp/probe.rs && /tmp/reap-liveness-probe &
+    /// cargo test the_gate_sees_an_owner_outside_reaps_own_tree -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs a process named reap-liveness-probe running outside reap's own tree"]
+    fn the_gate_sees_an_owner_outside_reaps_own_tree() {
+        refresh();
+        assert_eq!(
+            state(&["reap-liveness-probe".to_string()]),
+            Liveness::Running("reap-liveness-probe".to_string()),
+            "a running owner outside reap's own tree must be seen"
+        );
+    }
+
     #[test]
     fn an_owner_that_cannot_be_running_reads_as_idle() {
         refresh();
