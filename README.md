@@ -355,6 +355,22 @@ and `~/.cache` on macOS, `$XDG_CACHE_HOME` or `~/.cache` elsewhere. If a rule na
 something *inside* one of those directories, reap steps around it rather than over it, so
 the same gigabytes are never offered twice under two different labels.
 
+**What an uninstalled application left behind** is named as such, at any size. That sweep
+tells you a directory is "rebuilt by the owning app" — which is untrue when the owning app
+is gone. On macOS, reap inventories the bundle identifier of every installed application
+and checks it: a `~/Library/Caches/com.some.app` that nothing accounts for is not a cache
+any more, it is a leftover, and it is offered as one regardless of the 200 MB floor, since
+a floor exists to hide *unexplained* lumps and this one is explained.
+
+> [!NOTE]
+> The inventory fails closed. If it cannot be built, nothing is called a leftover and
+> every row keeps its ordinary wording — an empty inventory would otherwise assert that
+> nothing on the machine is installed. Apple's own identifiers are never offered, a helper
+> is accounted for by its parent application, and only direct children of
+> `~/Library/Caches` are considered, because a bundle identifier names nothing anywhere
+> else. This is macOS-only: Linux has no equivalent identifier and Windows records
+> installations in the registry rather than on disk.
+
 **A checkout is never offered as a cache**, however it got there. Tools that build in a
 scratch directory leave git worktrees under a cache root, and this sweep's claim is that
 the owning application rebuilds what it takes — which is exactly wrong about a

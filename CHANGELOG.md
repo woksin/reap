@@ -14,6 +14,21 @@ on each tag are the generated list of pull requests.
 
 ### Added
 
+- **What an uninstalled application left behind is named as such.** The cache
+  sweep tells you a directory is "rebuilt by the owning app", which is untrue
+  when that app is gone. reap now inventories the bundle identifier of every
+  installed application on macOS and checks it, so a `~/Library/Caches` entry
+  nothing accounts for is reported as a leftover rather than as an anonymous
+  lump — and at any size, since the 200MB floor exists to hide *unexplained*
+  entries and this one is explained. Enriching the existing sweep rather than
+  adding a second scanner means the same bytes can never be offered twice.
+  The inventory fails closed: if it cannot be built nothing is called a
+  leftover, because an empty one would assert that nothing on the machine is
+  installed. Apple's identifiers are never offered, a helper is accounted for by
+  its parent application, and only direct children of `~/Library/Caches` are
+  considered — a version number like `tool-0.13.2` parses as reverse DNS without
+  being an identifier at all, which a scan of a real machine caught. (#10)
+
 - **reap keeps a cache whose owner is running, and says which one.** A few
   caches are not merely rebuildable but live: removing a package manager's store
   while it is resolving corrupts an operation already in flight rather than
