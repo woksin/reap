@@ -212,21 +212,58 @@ mod unix {
             .to_string_lossy()
             .into_owned();
 
+        // Trash entries collide constantly — every project has a `node_modules`.
+        // The free name is *reserved* rather than tested for, because testing
+        // would be a race with reap itself: removals run concurrently and every
+        // one of them renames into this single directory. Two threads trashing
+        // a file of the same name would both see it free, and `rename` replaces
+        // a file rather than refusing — silently destroying something already
+        // in the trash, in the one mode whose whole promise is recoverability.
+        // `create_dir` and `create_new` fail with `AlreadyExists` instead, so
+        // whichever thread loses simply takes the next name.
+        //
+        // The reservation must match the kind being moved: renaming a directory
+        // onto a file fails, as does the reverse. `symlink_metadata`, so a link
+        // is judged as the link it is rather than as whatever it points at.
+        let is_dir = fs::symlink_metadata(path)?.is_dir();
         let mut dest = dir.join(&name);
         let mut n = 1;
-        // Trash entries collide constantly — every project has a `node_modules`.
-        while dest.exists() {
-            dest = dir.join(format!("{name} {n}"));
-            n += 1;
-            if n > 9999 {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "no free name in trash",
-                ));
+        loop {
+            let reserved = if is_dir {
+                fs::create_dir(&dest)
+            } else {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&dest)
+                    .map(drop)
+            };
+            match reserved {
+                Ok(()) => break,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    dest = dir.join(format!("{name} {n}"));
+                    n += 1;
+                    if n > 9999 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "no free name in trash",
+                        ));
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
 
-        fs::rename(path, &dest)?;
+        // Replaces our own reservation. If it fails, take the reservation back
+        // out rather than leaving an empty stub sitting in the user's trash.
+        if let Err(e) = fs::rename(path, &dest) {
+            let _ = if is_dir {
+                fs::remove_dir(&dest)
+            } else {
+                fs::remove_file(&dest)
+            };
+            return Err(e);
+        }
 
         #[cfg(not(target_os = "macos"))]
         {
@@ -338,6 +375,72 @@ mod tests {
         assert!(dest.join("artifact.bin").exists(), "contents must survive");
 
         fs::remove_dir_all(&dest).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Removals run concurrently and all of them rename into one trash
+    /// directory, so the free name has to be reserved rather than tested for.
+    /// Every project has a `node_modules` and every Downloads folder has a
+    /// `setup.dmg`; two of them trashed at once must both survive.
+    ///
+    /// Files rather than directories on purpose — this is the case that used to
+    /// lose data silently. `rename` refuses to replace a non-empty directory,
+    /// but it replaces a file without a word.
+    #[test]
+    fn concurrent_moves_of_the_same_name_keep_every_one() {
+        const RACERS: usize = 8;
+        let dir = std::env::temp_dir().join(format!("reap-trash-race-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // Each racer gets its own source directory but an identical file name,
+        // so they all compute the same first choice of destination.
+        let name = format!("reap-race-{}.bin", std::process::id());
+        let sources: Vec<_> = (0..RACERS)
+            .map(|i| {
+                let src = dir.join(format!("src{i}"));
+                fs::create_dir_all(&src).unwrap();
+                let file = src.join(&name);
+                // Distinct contents, so a lost racer is identifiable and not
+                // merely a count that happens to come out right.
+                fs::write(&file, format!("payload {i}")).unwrap();
+                file
+            })
+            .collect();
+
+        let landed: Vec<PathBuf> = std::thread::scope(|scope| {
+            // The collect is what makes this a race at all: it spawns every
+            // thread before the first is joined. Chaining spawn and join
+            // lazily, as `needless_collect` suggests, would start each thread
+            // only to wait for it — the moves would serialise, and the test
+            // would pass against the very bug it exists to catch.
+            #[allow(clippy::needless_collect)]
+            let handles: Vec<_> = sources
+                .iter()
+                .map(|src| scope.spawn(move || move_to_trash(src)))
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().expect("racer must not panic").ok().flatten())
+                .collect()
+        });
+
+        assert_eq!(landed.len(), RACERS, "every move must report where it went");
+
+        let mut survived: Vec<String> = landed
+            .iter()
+            .map(|p| fs::read_to_string(p).expect("each trashed file must still be readable"))
+            .collect();
+        survived.sort();
+        let mut expected: Vec<String> = (0..RACERS).map(|i| format!("payload {i}")).collect();
+        expected.sort();
+        assert_eq!(
+            survived, expected,
+            "no racer may overwrite another's entry in the trash"
+        );
+
+        for p in &landed {
+            fs::remove_file(p).ok();
+        }
         fs::remove_dir_all(&dir).ok();
     }
 
