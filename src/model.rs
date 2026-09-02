@@ -233,6 +233,16 @@ impl Candidate {
             Action::Remove(path) | Action::GitWorktreeRemove { path, .. } => Some(path.clone()),
             Action::None | Action::GitBranchDelete { .. } | Action::Run { .. } => None,
         };
+        // A row with nothing to run cannot give any disk back, so it must not
+        // default to the one eligibility that says it can. Every scanner that
+        // builds an actionless row already states an eligibility and overrides
+        // this, which is exactly why the wrong default was invisible: it waits
+        // for the first row that forgets, and then quietly promises bytes no
+        // keystroke can deliver.
+        let eligibility = match action {
+            Action::None => Eligibility::Protected,
+            _ => Eligibility::Reclaimable,
+        };
         Self {
             category,
             group: group.into(),
@@ -241,7 +251,7 @@ impl Candidate {
             size,
             age_days: None,
             risk,
-            eligibility: Eligibility::Reclaimable,
+            eligibility,
             action,
             footprint,
             owner: Vec::new(),
@@ -286,4 +296,45 @@ pub enum ScanEvent {
 pub enum ReapEvent {
     Progress(Box<crate::reaper::Report>),
     Finished,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn candidate(action: Action) -> Candidate {
+        Candidate::new(Category::Git, "g", "l", "", 100, Risk::Safe, action)
+    }
+
+    /// The header promises a reclaimable total and splits it by risk. A row
+    /// with nothing to run returns no disk, so defaulting it to `Reclaimable`
+    /// would put bytes into that promise that no keystroke can deliver.
+    ///
+    /// Every scanner that builds an actionless row states an eligibility and
+    /// overrides the default, which is precisely why the wrong one was
+    /// invisible: it waits for the first caller that forgets.
+    #[test]
+    fn a_row_with_nothing_to_run_is_not_offered_as_reclaimable() {
+        let cand = candidate(Action::None);
+        assert_eq!(cand.eligibility, Eligibility::Protected);
+        assert!(!cand.selectable());
+    }
+
+    #[test]
+    fn a_row_that_removes_a_path_is_reclaimable_by_default() {
+        let cand = candidate(Action::Remove(PathBuf::from("/work/project/target")));
+        assert_eq!(cand.eligibility, Eligibility::Reclaimable);
+        assert!(cand.selectable());
+    }
+
+    /// An explicit eligibility still wins, or the scanners could not mark a
+    /// live Docker image active or a locked worktree protected.
+    #[test]
+    fn an_explicit_eligibility_overrides_the_default() {
+        let cand = candidate(Action::Remove(PathBuf::from("/work/project/target")))
+            .with_eligibility(Eligibility::Recent);
+        assert_eq!(cand.eligibility, Eligibility::Recent);
+        assert!(!cand.selectable());
+    }
 }

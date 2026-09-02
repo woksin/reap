@@ -568,9 +568,17 @@ impl App {
             })
     }
 
+    /// Bytes reap could actually give back.
+    ///
+    /// Keyed on `selectable`, not on eligibility alone. A row that is
+    /// reclaimable but carries no action returns nothing if you take it, so
+    /// counting its bytes here would promise disk that no keystroke can
+    /// deliver. The same predicate drives the risk split and its counts, so the
+    /// three numbers in the header always describe one set — see
+    /// `the_risk_split_accounts_for_every_reclaimable_byte`.
     pub fn total_size(&self) -> u64 {
         self.assessed_sizes()
-            .filter(|(item, _)| item.eligibility == crate::model::Eligibility::Reclaimable)
+            .filter(|(item, _)| item.selectable())
             .map(|(_, size)| size)
             .sum()
     }
@@ -606,11 +614,12 @@ impl App {
     }
 
     /// Total unique bytes assigned to candidates at a given risk level.
+    ///
+    /// Same predicate as [`Self::total_size`] and [`Self::risk_count`], so the
+    /// split sums to the total and never sizes a tier the count then hides.
     pub fn risk_size(&self, risk: Risk) -> u64 {
         self.assessed_sizes()
-            .filter(|(item, _)| {
-                item.eligibility == crate::model::Eligibility::Reclaimable && item.risk == risk
-            })
+            .filter(|(item, _)| item.selectable() && item.risk == risk)
             .map(|(_, size)| size)
             .sum()
     }
