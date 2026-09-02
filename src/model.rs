@@ -213,6 +213,9 @@ pub struct Candidate {
     /// such as `git worktree remove`. Used to avoid counting or executing a
     /// nested artifact twice.
     pub footprint: Option<PathBuf>,
+    /// Programs whose running presence means this must be left alone. Empty for
+    /// almost everything; see [`crate::liveness`].
+    pub owner: Vec<String>,
     pub selected: bool,
 }
 
@@ -241,12 +244,18 @@ impl Candidate {
             eligibility: Eligibility::Reclaimable,
             action,
             footprint,
+            owner: Vec::new(),
             selected: false,
         }
     }
 
     pub const fn with_age(mut self, days: Option<u64>) -> Self {
         self.age_days = days;
+        self
+    }
+
+    pub fn with_owner(mut self, owner: Vec<String>) -> Self {
+        self.owner = owner;
         self
     }
 

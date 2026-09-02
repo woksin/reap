@@ -266,11 +266,16 @@ pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sy
         .into_iter()
         .partition(|c| matches!(c.action, Action::Remove(_)));
 
+    // One snapshot of the process table for the whole run, taken before
+    // anything is touched, so every candidate is judged against the same
+    // machine state rather than a table that drifts as the run proceeds.
+    crate::liveness::refresh();
+
     // Commands touch shared state — a repository's ref store, the Docker
     // daemon — and their order matters, so they stay serial.
     commands.sort_by_key(|c| command_order(&c.action));
     for cand in commands {
-        emit(report_for(&cand, execute(&cand.action, opts)));
+        emit(report_for(&cand, execute_candidate(&cand, opts)));
     }
 
     let (independent, nested_removals) = partition_removals(removals);
@@ -278,7 +283,7 @@ pub fn run_all(items: Vec<Candidate>, opts: ReapOpts, emit: impl Fn(Report) + Sy
     // Disjoint directory trees, so unlinking them concurrently is safe and
     // considerably faster when there are hundreds of thousands of inodes.
     independent.par_iter().for_each(|cand| {
-        emit(report_for(cand, execute(&cand.action, opts)));
+        emit(report_for(cand, execute_candidate(cand, opts)));
     });
 
     for cand in covered.into_iter().chain(nested_removals) {
@@ -434,6 +439,39 @@ fn execute_branch_delete(
     let section = format!("branch.{branch}");
     let _ = git_output(repo, &["config", "--remove-section", &section]);
     Outcome::Done
+}
+
+/// Run one candidate, refusing first if a program that owns it is running.
+///
+/// Checked at the deletion boundary rather than at scan time because a build
+/// can start in between, and this is the last moment before anything is
+/// touched. A refusal is reported as a failure rather than a skip: reap
+/// declined to do something that was asked for, and saying so is the point.
+/// That includes a dry run, where "this would be refused right now" is more
+/// useful than a plan that quietly would not hold.
+fn execute_candidate(cand: &Candidate, opts: ReapOpts) -> Outcome {
+    match liveness_refusal(crate::liveness::state(&cand.owner)) {
+        Some(reason) => Outcome::Failed(reason),
+        None => execute(&cand.action, opts),
+    }
+}
+
+/// What a liveness verdict means for the run, as words.
+///
+/// Split out so the three-way decision can be specified directly. Reaching
+/// [`crate::liveness::Liveness::Running`] through the real table would depend on
+/// a program being up on whatever machine the tests run on.
+fn liveness_refusal(state: crate::liveness::Liveness) -> Option<String> {
+    match state {
+        crate::liveness::Liveness::Idle => None,
+        crate::liveness::Liveness::Running(owner) => Some(format!(
+            "refused: {owner} is running and uses this — try again once it exits"
+        )),
+        // Not knowing is a claim about reap, not about the machine.
+        crate::liveness::Liveness::Unknown => {
+            Some("refused: could not read the process table to tell whether this is in use".into())
+        }
+    }
 }
 
 #[expect(
@@ -844,6 +882,57 @@ mod tests {
             Path::new(a_system_directory()).exists(),
             "filesystem must be untouched"
         );
+    }
+
+    /// A cache that is not merely rebuildable but *live*: deleting it under a
+    /// running owner corrupts that owner's work rather than costing a
+    /// re-download.
+    mod when_a_program_owns_what_is_being_reaped {
+        use super::*;
+        use crate::liveness::Liveness;
+
+        #[test]
+        fn a_running_owner_refuses_and_names_itself() {
+            let reason = liveness_refusal(Liveness::Running("cargo".into()))
+                .expect("a running owner must refuse");
+            assert!(reason.contains("cargo"), "was: {reason}");
+            assert!(
+                reason.contains("try again"),
+                "the refusal should say what to do about it: {reason}"
+            );
+        }
+
+        /// The whole point of the tri-state. An unreadable process table says
+        /// nothing about the machine, so it must not be read as permission.
+        #[test]
+        fn an_unreadable_process_table_refuses_rather_than_assuming_idle() {
+            let reason =
+                liveness_refusal(Liveness::Unknown).expect("not knowing must refuse, not proceed");
+            assert!(reason.starts_with("refused:"), "was: {reason}");
+        }
+
+        #[test]
+        fn an_idle_owner_does_not_stand_in_the_way() {
+            assert_eq!(liveness_refusal(Liveness::Idle), None);
+        }
+
+        /// End to end: a rule naming an owner that cannot possibly be running
+        /// must still reap normally. A gate that blocks the ordinary case would
+        /// be worse than no gate at all.
+        #[test]
+        fn an_owner_that_is_not_running_reaps_as_usual() {
+            let root = tmp("owner-idle");
+            let target = root.join("store");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("pkg.tgz"), b"payload").unwrap();
+
+            let cand = candidate("a live cache", 100, &target)
+                .with_owner(vec!["reap-no-such-program-xyzzy".to_string()]);
+            let out = run(vec![cand], plain(false));
+
+            assert!(out[0].ok, "error was: {:?}", out[0].error);
+            assert!(!target.exists(), "it should actually have been removed");
+        }
     }
 
     #[test]

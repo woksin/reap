@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod config;
 mod guide;
+mod liveness;
 mod model;
 mod reaper;
 mod recipes;

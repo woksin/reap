@@ -624,6 +624,7 @@ mod tests {
             detail: String::new(),
             risk: RiskName::Safe,
             prune: vec![],
+            owner: vec![],
         });
 
         let rules = Rules::from_config(&cfg);

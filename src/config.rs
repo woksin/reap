@@ -123,6 +123,15 @@ pub struct CacheRule {
     /// bookkeeping — `["pnpm", "store", "prune"]`.
     #[serde(default)]
     pub prune: Vec<String>,
+    /// Programs whose running presence means this cache is in use.
+    ///
+    /// For the caches that are not merely rebuildable but *live*: deleting a
+    /// package manager's store mid-resolve corrupts an operation in flight
+    /// rather than costing a re-download. Naming an owner here makes reap keep
+    /// the cache while that program is up, and say so. An empty list — the
+    /// default, and the right answer for most caches — makes no claim at all.
+    #[serde(default)]
+    pub owner: Vec<String>,
 }
 
 /// A directory a coding agent keeps, and what it costs to lose it.
@@ -459,6 +468,14 @@ never_descend = [
 # machine does not have is simply a rule that does not apply, so one config can
 # cover every machine you use.
 #
+# `owner` names the programs that make this cache *live*: reap keeps it, and
+# says which one, while any of them is running. It is for the caches where
+# deleting underneath a running tool corrupts what that tool is doing rather
+# than merely costing a re-download — a package manager's store, not a browser
+# cache. Most rules want no owner at all, which is the default. Setting it to
+# an empty list on a rule that has one built in turns the check off for that
+# rule.
+#
 # [[cache]]
 # path = "~/.cache/my-tool"
 # group = "package managers"
@@ -466,6 +483,7 @@ never_descend = [
 # detail = "re-downloaded on next run"
 # risk = "safe"
 # prune = ["my-tool", "cache", "clean"]
+# owner = ["my-tool"]
 #
 # [[cache]]
 # path = "%LOCALAPPDATA%/my-tool/cache"
