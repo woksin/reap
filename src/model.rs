@@ -328,6 +328,41 @@ mod tests {
         assert!(cand.selectable());
     }
 
+    /// `--reap --risk` and every recipe ceiling are written as `risk <=
+    /// ceiling`, which is the *derived* ordering, which follows declaration
+    /// order. Tidying these three variants into any other arrangement —
+    /// alphabetically, say — turns that comparison inside out.
+    ///
+    /// There is no confirmation gate on the headless path; the ceiling is the
+    /// only thing standing in front of it. `--reap --yes` in a cron job would
+    /// begin taking irreversible items and say nothing, so the ordering is a
+    /// safety property and belongs under test rather than under review.
+    #[test]
+    fn the_risk_levels_order_from_least_to_most_costly() {
+        assert!(Risk::Safe < Risk::Caution);
+        assert!(Risk::Caution < Risk::Danger);
+        assert!(Risk::Safe < Risk::Danger);
+    }
+
+    /// The property the ceiling actually relies on, stated as the ceiling uses
+    /// it rather than as three pairwise comparisons.
+    #[test]
+    fn a_ceiling_admits_everything_cheaper_and_nothing_costlier() {
+        let all = [Risk::Safe, Risk::Caution, Risk::Danger];
+        let admitted = |ceiling: Risk| {
+            all.iter()
+                .copied()
+                .filter(|risk| *risk <= ceiling)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(admitted(Risk::Safe), vec![Risk::Safe]);
+        assert_eq!(admitted(Risk::Caution), vec![Risk::Safe, Risk::Caution]);
+        assert_eq!(
+            admitted(Risk::Danger),
+            vec![Risk::Safe, Risk::Caution, Risk::Danger]
+        );
+    }
+
     /// An explicit eligibility still wins, or the scanners could not mark a
     /// live Docker image active or a locked worktree protected.
     #[test]
