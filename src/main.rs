@@ -154,6 +154,14 @@ enum RiskCeiling {
     Irreversible,
 }
 
+/// The ceiling `--reap` runs under when none is named.
+///
+/// Named rather than written inline at the one place that reads it, so the
+/// default is a thing a test can hold rather than a literal buried in an
+/// expression. Nothing on the headless path asks for confirmation, so what this
+/// is set to is the whole of the protection.
+const DEFAULT_CEILING: RiskCeiling = RiskCeiling::Safe;
+
 impl From<RiskCeiling> for Risk {
     fn from(c: RiskCeiling) -> Self {
         match c {
@@ -515,7 +523,7 @@ fn reap_mode(opts: ScanOpts, cfg: &config::Config, cli: &Cli, trash: bool) -> Re
             recipe.name.clone(),
         )
     } else {
-        let ceiling: Risk = cli.risk.unwrap_or(RiskCeiling::Safe).into();
+        let ceiling: Risk = cli.risk.unwrap_or(DEFAULT_CEILING).into();
         (
             items
                 .into_iter()
@@ -1088,5 +1096,32 @@ fn in_browsing(app: &mut App, code: KeyCode) {
         KeyCode::Char('d') => app.begin_confirm(),
         KeyCode::Char('r') => app.rescan(),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The words on the command line and the levels inside reap are two
+    /// different vocabularies, and `--risk` is the only thing standing in front
+    /// of `--reap --yes`. A mapping that drifted would not fail loudly; it would
+    /// quietly raise the ceiling on a run nobody is watching.
+    #[test]
+    fn each_ceiling_names_the_level_a_person_asked_for() {
+        assert_eq!(Risk::from(RiskCeiling::Safe), Risk::Safe);
+        assert_eq!(Risk::from(RiskCeiling::Rebuildable), Risk::Caution);
+        assert_eq!(Risk::from(RiskCeiling::Irreversible), Risk::Danger);
+    }
+
+    /// Asking for nothing in particular must not authorise anything that costs
+    /// work. This reads the same constant `--reap` does, so raising the default
+    /// cannot pass unnoticed.
+    #[test]
+    fn asking_for_no_ceiling_admits_only_what_is_safe() {
+        let ceiling: Risk = DEFAULT_CEILING.into();
+        assert_eq!(ceiling, Risk::Safe);
+        assert!(Risk::Caution > ceiling, "rebuildable must be excluded");
+        assert!(Risk::Danger > ceiling, "irreversible must be excluded");
     }
 }
