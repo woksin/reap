@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod apps;
 pub mod artifacts;
 pub mod cache_rules;
 pub mod caches;

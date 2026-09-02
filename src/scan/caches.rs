@@ -358,6 +358,34 @@ fn holds_a_checkout(dir: &std::path::Path, depth: usize) -> bool {
         .any(|e| holds_a_checkout(&e.path(), depth - 1))
 }
 
+/// Is this entry what an uninstalled application left behind?
+///
+/// Only ever with proof. `None` — no inventory could be established, or the
+/// platform has none to establish — answers `false` for everything, so the
+/// sweep keeps the cautious wording it has always used rather than guessing in
+/// the direction of a stronger claim.
+fn is_leftover(
+    path: &std::path::Path,
+    name: &str,
+    bundle_root: Option<&std::path::Path>,
+    installed: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    // Bundle identifiers are a macOS idea, and they name direct children of
+    // `~/Library/Caches` — nowhere else. `~/.cache` holds tool names, and a
+    // tool that puts its version in the directory name produces something that
+    // parses as reverse DNS without being an identifier at all. Anchoring to
+    // the one root where the concept exists is what makes the rest of this
+    // sound, rather than relying on the shape of a name alone.
+    if bundle_root.is_none_or(|root| path.parent() != Some(root)) {
+        return false;
+    }
+    installed.is_some_and(|ids| {
+        super::apps::looks_like_a_bundle_id(name)
+            && !super::apps::is_apple(name)
+            && !super::apps::accounted_for(ids, name)
+    })
+}
+
 /// Anything large under the platform's application-cache root that no rule
 /// already names — `~/Library/Caches` on macOS, `~/.cache` elsewhere.
 fn library_caches(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent>) {
@@ -373,23 +401,71 @@ fn library_caches(home: &std::path::Path, opts: &ScanOpts, tx: &Sender<ScanEvent
     // These are noisy, so only surface the ones actually worth a keystroke.
     let floor = opts.min_size.max(opts.rules.library_cache_floor);
 
+    // Evidence for the sentence below. Resolved once, before the parallel
+    // walk, so the `plutil` cost is paid a single time; `None` means the
+    // machine could not be inventoried and every row keeps the cautious
+    // wording it always had.
+    let installed = super::apps::installed();
+    // The one root where a directory name is a bundle identifier.
+    let bundle_root = if cfg!(target_os = "macos") {
+        Some(home.join("Library/Caches"))
+    } else {
+        None
+    };
+
     entries.par_iter().for_each_with(tx.clone(), |tx, path| {
-        let (size, newest) = opts.cache.measure(path);
-        if size < floor {
-            return;
-        }
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+
+        // "Rebuilt by the owning app" is the claim this sweep makes about
+        // everything it finds, and for a directory whose owning app was
+        // uninstalled it is simply false: nothing will rebuild it, and it is
+        // not a cache any more but what an application left behind. Saying so
+        // is worth more than the row itself.
+        //
+        // Only ever with proof. Without an inventory, or for anything that is
+        // not plainly a bundle identifier, the original wording stands.
+        let orphaned = is_leftover(path, &name, bundle_root.as_deref(), installed);
+
+        // The 200MB floor exists because an unexplained lump is noise. A
+        // leftover is not unexplained — it is named, and its owner is gone — so
+        // it only has to clear the global "hide anything under" threshold.
+        let effective_floor = if orphaned { opts.min_size } else { floor };
+
+        let (size, newest) = opts.cache.measure(path);
+        if size < effective_floor {
+            return;
+        }
+
+        let (detail, risk) = if orphaned {
+            (
+                format!("{} · no installed app owns this", tilde(path)),
+                // Nothing is lost either way. If the inventory is right the
+                // owner is gone and this is dead weight; if it somehow missed
+                // an installed app, this is a cache and that app rebuilds it.
+                crate::model::Risk::Safe,
+            )
+        } else {
+            (
+                format!("{} · rebuilt by the owning app", tilde(path)),
+                crate::model::Risk::Caution,
+            )
+        };
+
         let cand = Candidate::new(
             Category::Caches,
-            "application caches",
+            if orphaned {
+                "uninstalled app leftovers"
+            } else {
+                "application caches"
+            },
             name,
-            format!("{} · rebuilt by the owning app", tilde(path)),
+            detail,
             size,
-            crate::model::Risk::Caution,
+            risk,
             Action::Remove(path.clone()),
         )
         .with_age(newest.map(days_since));
@@ -470,6 +546,100 @@ mod tests {
             std::fs::create_dir_all(root.join(child)).unwrap();
         }
         root
+    }
+
+    /// The sweep's standing claim is that what it finds is "rebuilt by the
+    /// owning app". These decide when that sentence is false.
+    mod when_deciding_whether_an_owner_still_exists {
+        use super::*;
+        use std::collections::HashSet;
+
+        fn installed(ids: &[&str]) -> HashSet<String> {
+            ids.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        const BUNDLE_ROOT: &str = "/Users/someone/Library/Caches";
+
+        /// A direct child of the macOS application-cache root.
+        fn under_bundle_root(name: &str) -> PathBuf {
+            PathBuf::from(BUNDLE_ROOT).join(name)
+        }
+
+        fn verdict(name: &str, ids: Option<&HashSet<String>>) -> bool {
+            is_leftover(
+                &under_bundle_root(name),
+                name,
+                Some(Path::new(BUNDLE_ROOT)),
+                ids,
+            )
+        }
+
+        #[test]
+        fn a_bundle_no_installed_app_accounts_for_is_a_leftover() {
+            let ids = installed(&["com.microsoft.vscode"]);
+            assert!(verdict("com.dead.editor", Some(&ids)));
+        }
+
+        #[test]
+        fn a_bundle_an_installed_app_accounts_for_is_not() {
+            let ids = installed(&["com.microsoft.vscode"]);
+            assert!(!verdict("com.microsoft.VSCode", Some(&ids)));
+        }
+
+        /// Without an inventory every row keeps the wording it always had.
+        /// This is the whole fail-closed property: no inventory must never
+        /// become "nothing is installed, so everything is a leftover".
+        #[test]
+        fn nothing_is_a_leftover_when_the_machine_could_not_be_inventoried() {
+            assert!(!verdict("com.dead.editor", None));
+        }
+
+        #[test]
+        fn an_ordinary_directory_name_is_never_a_leftover() {
+            let ids = installed(&["com.microsoft.vscode"]);
+            // The sweep is full of these, and none of them is a bundle id.
+            for name in ["Google", "Homebrew", "node-gyp", "com.example"] {
+                assert!(!verdict(name, Some(&ids)), "{name} is not a bundle id");
+            }
+        }
+
+        #[test]
+        fn apples_own_caches_are_left_alone_even_when_unaccounted_for() {
+            let ids = installed(&["com.microsoft.vscode"]);
+            assert!(!verdict("com.apple.Safari", Some(&ids)));
+        }
+
+        /// The concept only exists under the macOS application-cache root. A
+        /// real scan of a real machine offered two build-tool caches from
+        /// `~/.cache` as uninstalled applications' leftovers, because a version
+        /// number parses as reverse DNS. Anchoring to the root is what makes
+        /// that impossible rather than merely unlikely.
+        #[test]
+        fn a_directory_outside_the_bundle_root_is_never_a_leftover() {
+            let ids = installed(&["com.microsoft.vscode"]);
+            let elsewhere = PathBuf::from("/Users/someone/.cache")
+                .join("critterstack-consumer-generation-0.13.2");
+            assert!(!is_leftover(
+                &elsewhere,
+                "critterstack-consumer-generation-0.13.2",
+                Some(Path::new(BUNDLE_ROOT)),
+                Some(&ids),
+            ));
+        }
+
+        /// And nested entries are not identifiers either: `Google/Chrome` is a
+        /// path, not a bundle id, however the sweep reached it.
+        #[test]
+        fn a_nested_entry_is_never_a_leftover() {
+            let ids = installed(&["com.microsoft.vscode"]);
+            let nested = under_bundle_root("Google").join("com.dead.editor");
+            assert!(!is_leftover(
+                &nested,
+                "com.dead.editor",
+                Some(Path::new(BUNDLE_ROOT)),
+                Some(&ids),
+            ));
+        }
     }
 
     #[test]
