@@ -29,6 +29,13 @@ on each tag are the generated list of pull requests.
   to `Protected`, which is what "nothing can take this" means; an explicit
   eligibility still overrides it, so live Docker images and locked worktrees are
   unaffected.
+- **`--json` and `--list` count the same way the interface does.** The headless
+  surfaces carried their own copy of that predicate in four places — the risk
+  split, the reclaimable total, the item count, and the per-filesystem
+  projection — all keyed on eligibility alone. The default above hides the
+  disagreement but does not close it, since an explicit `with_eligibility`
+  overrides a default. Both surfaces now call the one method, so a scan cannot
+  report one total to a person and another to a script.
 
 ### Added
 

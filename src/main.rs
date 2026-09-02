@@ -363,9 +363,7 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
             let matching: Vec<_> = assessed
                 .iter()
                 .zip(&assessed_exclusive)
-                .filter(|(item, _)| {
-                    item.eligibility == model::Eligibility::Reclaimable && item.risk == *risk
-                })
+                .filter(|(item, _)| item.selectable() && item.risk == *risk)
                 .collect();
             (
                 risk.label().to_string(),
@@ -377,16 +375,17 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
+    // `selectable`, not eligibility alone, and for the same reason the
+    // interface uses it: a row that is reclaimable but carries no action
+    // returns no disk when taken. Both surfaces call the one method so they
+    // cannot drift into reporting different totals for the same scan.
     let total = assessed
         .iter()
         .zip(&assessed_exclusive)
-        .filter(|(item, _)| item.eligibility == model::Eligibility::Reclaimable)
+        .filter(|(item, _)| item.selectable())
         .map(|(_, bytes)| *bytes)
         .sum::<u64>();
-    let reclaimable_items = assessed
-        .iter()
-        .filter(|item| item.eligibility == model::Eligibility::Reclaimable)
-        .count();
+    let reclaimable_items = assessed.iter().filter(|item| item.selectable()).count();
 
     let mut projected: std::collections::BTreeMap<
         String,
@@ -394,7 +393,7 @@ fn json_mode(opts: ScanOpts) -> Result<()> {
     > = std::collections::BTreeMap::new();
     let mut logical_unassigned = 0u64;
     for (item, bytes) in assessed.iter().zip(&assessed_exclusive) {
-        if item.eligibility != model::Eligibility::Reclaimable || *bytes == 0 {
+        if !item.selectable() || *bytes == 0 {
             continue;
         }
         let stat = item.footprint.as_deref().and_then(util::disk_stat);
