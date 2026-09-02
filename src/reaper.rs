@@ -47,26 +47,46 @@ fn in_system_root(path: &Path) -> bool {
         .is_some_and(|first| WINDOWS_SYSTEM_ROOTS.contains(&first.as_str()))
 }
 
+/// Unix directories that belong to the system along with everything inside
+/// them.
+///
+/// Nothing reap offers lives below any of these: every cache and artifact rule
+/// is written against `$HOME`. So the whole subtree is refused rather than only
+/// the root, which is what the Windows arm above has always done. Matching only
+/// the root left real paths reachable — `/usr/lib/node_modules` is where a
+/// global npm install puts itself, and a scan root added by hand can walk
+/// straight into it.
+#[cfg(not(windows))]
+const SYSTEM_SUBTREES: &[&str] = &[
+    "/bin",
+    "/sbin",
+    "/boot",
+    "/proc",
+    "/sys",
+    "/etc",
+    "/usr",
+    "/System",
+    "/Library",
+    "/Applications",
+];
+
+/// Unix directories that must survive themselves, while their children are
+/// ordinary.
+///
+/// These cannot be subtrees. `$HOME` is `/home/name` on Linux and `/root` for
+/// root, so refusing those subtrees would refuse everything reap exists to
+/// find. `/opt` holds Homebrew. `/var` is where macOS puts `$TMPDIR`, as
+/// `/var/folders/…`, which is an ordinary place to own a directory.
+#[cfg(not(windows))]
+const SYSTEM_ROOTS: &[&str] = &["/", "/home", "/root", "/srv", "/opt", "/var"];
+
 #[cfg(not(windows))]
 fn in_system_root(path: &Path) -> bool {
-    matches!(
-        path.to_str().unwrap_or(""),
-        "/" | "/usr"
-            | "/etc"
-            | "/var"
-            | "/bin"
-            | "/sbin"
-            | "/opt"
-            | "/boot"
-            | "/proc"
-            | "/sys"
-            | "/home"
-            | "/root"
-            | "/srv"
-            | "/System"
-            | "/Library"
-            | "/Applications"
-    )
+    // `Path::starts_with` compares whole components, so `/usrlocal` is not
+    // caught by `/usr`, and a path that is not valid UTF-8 is still compared
+    // rather than silently allowed the way a `to_str` match would allow it.
+    SYSTEM_ROOTS.iter().any(|root| path == Path::new(root))
+        || SYSTEM_SUBTREES.iter().any(|root| path.starts_with(root))
 }
 
 /// Paths that must never be handed to a recursive delete, however we got here.
@@ -84,6 +104,33 @@ fn is_forbidden(path: &Path) -> bool {
         return true;
     }
     in_system_root(path)
+}
+
+/// Would this path be forbidden once the kernel has resolved the way there?
+///
+/// [`is_forbidden`] matches on the literal path, which is the whole story for
+/// the leaf: a symlink is unlinked rather than followed, so its target is never
+/// at risk. It is not the story for the *ancestors*, which the kernel resolves
+/// during traversal. A redirected `~/.cache` — a link some tool left behind, or
+/// a deliberate move onto another volume — lets a cache sweep delete whatever
+/// it points at while the string being checked still reads as an ordinary path
+/// under `$HOME`.
+///
+/// Deny-only, deliberately. A resolved path may add a refusal and can never
+/// remove one, so an ordinary target whose parent merely happens to be a link
+/// keeps the verdict its literal spelling already earned. That is what makes
+/// this safe to run before the allowances rather than after them.
+fn resolves_into_forbidden(path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    // A parent that will not resolve is not evidence of anything — most often
+    // it simply does not exist, which `execute` already treats as nothing to
+    // do. Refusing here would turn an absent path into a reported failure.
+    let Ok(resolved) = std::fs::canonicalize(parent) else {
+        return false;
+    };
+    resolved != parent && is_forbidden(&resolved.join(name))
 }
 
 #[derive(Clone, Copy)]
@@ -400,6 +447,14 @@ fn execute(action: &Action, opts: ReapOpts) -> Outcome {
             if is_forbidden(path) {
                 return Outcome::Failed("refused: path is too broad to delete".into());
             }
+            // Checked here rather than at scan time on purpose: a link can be
+            // introduced between the scan and the confirmation, and this is the
+            // last moment before the filesystem is touched.
+            if resolves_into_forbidden(path) {
+                return Outcome::Failed(
+                    "refused: path resolves through a link into a protected location".into(),
+                );
+            }
             if !path.exists() {
                 return Outcome::Skipped;
             }
@@ -671,6 +726,111 @@ mod tests {
     #[test]
     fn allows_a_normal_nested_target() {
         assert!(!is_forbidden(Path::new(an_ordinary_target())));
+    }
+
+    /// The backstop covers what is *inside* a system directory, not only the
+    /// directory itself. `/usr/lib/node_modules` is where a global npm install
+    /// lands, so this is a path that really exists on real machines.
+    #[test]
+    #[cfg(not(windows))]
+    fn refuses_what_lives_inside_a_system_directory() {
+        for p in [
+            "/usr/lib/node_modules",
+            "/etc/ssh",
+            "/Library/Caches/com.apple.something",
+            "/System/Library/Frameworks",
+        ] {
+            assert!(is_forbidden(Path::new(p)), "{p} should be refused");
+        }
+    }
+
+    /// The roots whose children are ordinary must keep letting those children
+    /// through, or reap refuses the only places it ever looks.
+    #[test]
+    #[cfg(not(windows))]
+    fn still_allows_the_places_reap_actually_looks() {
+        for p in [
+            "/home/someone/.cache/pip",
+            "/root/.cache/go-build",
+            "/opt/homebrew/Caskroom",
+            // macOS spells `$TMPDIR` this way.
+            "/var/folders/xy/T/build",
+            "/usrlocal/share",
+        ] {
+            assert!(!is_forbidden(Path::new(p)), "{p} should be allowed");
+        }
+    }
+
+    /// A link is resolved before the refusal is decided.
+    ///
+    /// Only ancestors need this. The leaf is never followed: `remove_dir_all`
+    /// refuses a symlink and the fallback unlinks the link itself, so what it
+    /// points at is never at risk.
+    #[cfg(unix)]
+    mod through_a_link {
+        use super::*;
+
+        #[test]
+        fn refuses_a_target_whose_parent_leads_into_a_system_directory() {
+            let root = tmp("link-into-system");
+            let link = root.join("cache");
+            std::os::unix::fs::symlink("/usr/lib", &link).unwrap();
+            let target = link.join("node_modules");
+
+            assert!(
+                !is_forbidden(&target),
+                "the literal path is unremarkable, which is the point"
+            );
+            assert!(resolves_into_forbidden(&target));
+        }
+
+        /// Deny-only: resolution may add a refusal and must never invent one
+        /// for a target that simply lives behind a link.
+        #[test]
+        fn allows_a_target_whose_parent_leads_somewhere_ordinary() {
+            let root = tmp("link-into-ordinary");
+            let real = root.join("elsewhere/deps");
+            std::fs::create_dir_all(&real).unwrap();
+            let link = root.join("cache");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert!(!resolves_into_forbidden(&link.join("node_modules")));
+        }
+
+        /// A path that does not exist yet cannot be resolved, and that is not
+        /// evidence of anything. `execute` reports it as nothing to do.
+        #[test]
+        fn says_nothing_about_a_parent_that_does_not_exist() {
+            let root = tmp("link-absent");
+            assert!(!resolves_into_forbidden(&root.join("gone/deps")));
+        }
+
+        #[test]
+        fn refuses_rather_than_deletes_what_the_link_points_at() {
+            let root = tmp("link-refusal");
+            let real = root.join("precious");
+            std::fs::create_dir_all(&real).unwrap();
+            std::fs::write(real.join("work.txt"), b"the only copy").unwrap();
+
+            // A link standing in for a redirected cache root, pointed at a
+            // directory the depth rule would otherwise wave through.
+            let link = root.join("cache");
+            std::os::unix::fs::symlink("/usr/lib", &link).unwrap();
+
+            let out = run(
+                vec![candidate("through a link", 100, &link.join("node_modules"))],
+                plain(false),
+            );
+            assert_eq!(out.len(), 1);
+            assert!(!out[0].ok);
+            assert_eq!(out[0].freed, 0);
+            assert!(
+                out[0].error.as_ref().unwrap().contains("resolves"),
+                "error was: {:?}",
+                out[0].error
+            );
+            assert!(real.join("work.txt").exists());
+        }
     }
 
     #[test]

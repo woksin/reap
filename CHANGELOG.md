@@ -14,6 +14,49 @@ on each tag are the generated list of pull requests.
 
 ### Fixed
 
+- **Trashing two things of the same name no longer loses one of them.** Path
+  removals run concurrently and every one of them renames into a single trash
+  directory, so testing for a free name and then renaming into it was a race:
+  two threads both saw the name free, and `rename` replaces a file without
+  reporting anything. The name is now reserved atomically, so whichever thread
+  loses takes the next one. A regression test races eight identically named
+  files and reads every payload back; against the previous code three of the
+  eight were destroyed. This affected `--trash`, whose entire promise is that
+  the removal is recoverable.
+- **A git worktree can be protected by the path it occupies.** Ignore and risk
+  rules matched a candidate's path only when the action was a path removal, but
+  a worktree is removed by `git worktree remove` — so naming its directory
+  protected nothing, and its label (`repo: ~/work/wt`) did not match a bare path
+  either. Pressing `x` on a worktree reported that it was now ignored while the
+  row stayed on the list, because the rule it had just written could never
+  match. Rules now match the candidate's *footprint*, the tree it affects
+  whatever mechanism reaches it, which also covers a tool's own cache cleaner
+  and the object store a `git gc` rewrites. The path-removal case is still
+  matched alongside it, so this can only protect more, never less.
+- **An ignore written through a symlink now actually protects what it names.**
+  reap canonicalises its scan roots so one tree is never scanned twice, which
+  means a finding reports the resolved path — while the person protecting a
+  directory writes the spelling they reach it by. `~/src/keep` therefore never
+  met `/Volumes/sourcecode/keep`, and the rule silently did nothing. Absolute
+  patterns are now also matched resolved, worked out once when the ignore list
+  is built rather than per finding. Only absolute ones: a bare word like
+  `JetBrains` is matched against labels and groups, and resolving it would
+  anchor it to the working directory. The change is purely additive, so nothing
+  already ignored stops being ignored.
+- **The deletion backstop covers system directories, not just their names.** The
+  refusal list matched a path only when it was exactly a system root, so
+  `/usr/lib/node_modules` — where a global npm install puts itself — passed it,
+  while the Windows arm had always matched the whole subtree. Roots whose
+  children are ordinary (`/home`, `/root`, `/opt`, `/var`, which is where macOS
+  puts `$TMPDIR`) keep letting those children through.
+- **A refusal now considers where a path leads, not only how it is spelled.**
+  The kernel resolves the ancestors of a path during traversal, so a redirected
+  `~/.cache` would let a cache sweep delete whatever it pointed at while the
+  path still read as ordinary. The check re-runs against the resolved parent and
+  is deny-only — it can add a refusal and never grant one — so an ordinary
+  target that merely sits behind a link keeps the verdict it already had. The
+  leaf is deliberately not resolved: a symlink is unlinked rather than
+  descended, so its target was never at risk.
 - **The interface is responsive immediately again.** Storage topology and
   post-scan pool assessment no longer block the first frame, capacity-only
   output no longer invokes macOS `diskutil`, and disk identity is resolved once

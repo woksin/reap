@@ -526,7 +526,13 @@ instead. Recorded with `--dry-run`, which is why it says so.</sub>
 Beyond that:
 
 - A recursive delete **refuses** any path fewer than three components deep, `$HOME`
-  itself, and the system directories — whatever the scanners produce.
+  itself, and the system directories and everything inside them — whatever the scanners
+  produce.
+- That refusal is re-checked against **where the path actually leads**, not merely how it
+  is spelled. The leaf is never followed — a symlink is unlinked rather than descended —
+  but the kernel resolves the *ancestors*, so a redirected `~/.cache` would otherwise let
+  a cache sweep delete whatever it points at while the path still reads as ordinary. The
+  resolved answer can only ever add a refusal, never grant one.
 - **Linked worktrees share one object store** with their main worktree, so each set is
   collapsed to a single repository. Otherwise every branch, stash and `gc` gets reported
   once per checkout.
@@ -555,6 +561,12 @@ container are still separate filesystems here.
 > Trashing frees **nothing** — the bytes sit there until the trash is emptied. reap says so
 > rather than claiming a win it did not deliver, and the report offers `e` to permanently
 > delete *only the entries that run created*, leaving anything you trashed yourself alone.
+
+Every project has a `node_modules` and every Downloads folder has a `setup.dmg`, so trash
+names collide constantly. reap **reserves** the free name rather than testing for one:
+removals run concurrently and all of them rename into the same directory, and `rename`
+replaces a file without a word. Two items of the same name trashed at once both survive,
+under distinct names.
 
 If a path cannot be trashed, reap reports the failure rather than silently falling back to
 an unrecoverable delete.
@@ -632,6 +644,10 @@ Patterns match against a candidate's **path**, its **label**, and its
 **`category/group`**. `*` matches any run of characters, and a pattern with no wildcard
 also matches everything beneath it.
 
+The path matched is the tree the candidate *affects*, not the mechanism reap would use on
+it — so naming a directory protects it whether reap would unlink it, run
+`git worktree remove` on it, or hand it to the owning tool's own cache cleaner.
+
 ```toml
 ignore = [
   "~/.nuget/packages",       # one cache, always
@@ -643,6 +659,12 @@ ignore = [
 
 Pressing `x` on a candidate appends the right pattern and writes the file — a path when
 there is one, so the rule survives a rename, otherwise the group.
+
+An absolute pattern is also matched with its symlinks resolved, so a directory reached
+through a link can be protected by the name you actually reach it by. reap canonicalises
+its scan roots — `~/src -> /Volumes/sourcecode` is scanned once, not twice — so a finding
+reports the resolved path while you would naturally write `~/src/…`. Both spellings
+protect it.
 
 ### Adding rules
 

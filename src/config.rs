@@ -575,9 +575,25 @@ const CONFIG_HEADER: &str = "\
 
 /// Compiled ignore patterns.
 #[derive(Default)]
+/// One ignore pattern, in every spelling it may have to match.
+struct Pattern {
+    /// Exactly what was written, matched as-is.
+    raw: String,
+    /// `~` and `%VAR%` expanded.
+    expanded: String,
+    /// The expanded form with its symlinks resolved, when it names something
+    /// that exists and resolving changes it.
+    ///
+    /// Scan roots are canonicalised — `normalise_roots` resolves `~/src ->
+    /// /Volumes/sourcecode` so one tree is never scanned twice — so a finding
+    /// carries the resolved path while the person protecting it wrote the
+    /// spelling they reach it by. Without this the two never meet, and an
+    /// ignore that silently does nothing is worse than one never offered.
+    resolved: Option<String>,
+}
+
 pub struct IgnoreSet {
-    /// (original pattern, expanded form used for matching)
-    patterns: Vec<(String, String)>,
+    patterns: Vec<Pattern>,
 }
 
 impl IgnoreSet {
@@ -591,17 +607,44 @@ impl IgnoreSet {
                     } else {
                         p.clone()
                     };
-                    (p.clone(), expanded)
+                    // Resolved once here rather than per finding: this is a
+                    // handful of patterns against potentially thousands of
+                    // them, so the syscall must not sit on that path.
+                    //
+                    // Only absolute patterns. A bare word like `JetBrains` is
+                    // matched against labels and groups, not paths, and
+                    // resolving it would silently anchor it to the working
+                    // directory — turning a name into a path that could ignore
+                    // something never intended.
+                    let resolved = Path::new(&expanded)
+                        .is_absolute()
+                        .then(|| std::fs::canonicalize(&expanded).ok())
+                        .flatten()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .filter(|candidate| *candidate != expanded);
+                    Pattern {
+                        raw: p.clone(),
+                        expanded,
+                        resolved,
+                    }
                 })
                 .collect(),
         }
     }
 
     /// True when any pattern matches the given text.
+    ///
+    /// Purely additive: a further spelling can only ever protect more, never
+    /// less, so nothing already ignored stops being ignored.
     pub fn matches_text(&self, text: &str) -> bool {
-        self.patterns
-            .iter()
-            .any(|(raw, expanded)| matches_one(expanded, text) || matches_one(raw, text))
+        self.patterns.iter().any(|pattern| {
+            matches_one(&pattern.expanded, text)
+                || matches_one(&pattern.raw, text)
+                || pattern
+                    .resolved
+                    .as_deref()
+                    .is_some_and(|resolved| matches_one(resolved, text))
+        })
     }
 
     pub fn matches_path(&self, path: &Path) -> bool {
@@ -613,6 +656,18 @@ impl IgnoreSet {
     pub fn matches_candidate(&self, cand: &crate::model::Candidate) -> bool {
         if self.patterns.is_empty() {
             return false;
+        }
+        // The footprint is the tree a candidate affects, whatever mechanism
+        // reap would use to get there: unlinking a path, `git worktree remove`,
+        // or a tool's own cache cleaner. Matching only `Action::Remove` meant a
+        // worktree could not be protected by the path it occupies — the
+        // highest-stakes action reap takes on the filesystem, and the worst
+        // place for a protection to quietly not apply. The `Remove` arm is kept
+        // alongside it so this can only ever protect more, never less.
+        if let Some(path) = &cand.footprint
+            && self.matches_path(path)
+        {
+            return true;
         }
         if let crate::model::Action::Remove(p) = &cand.action
             && self.matches_path(p)
@@ -780,6 +835,74 @@ mod tests {
         assert!(set.matches_candidate(&candidate("JetBrains", "g", None)));
         assert!(set.matches_candidate(&candidate("x", "application caches", None)));
         assert!(!set.matches_candidate(&candidate("x", "g", Some("/opt/other"))));
+    }
+
+    /// Scan roots are canonicalised — `normalise_roots` resolves `~/src ->
+    /// /Volumes/sourcecode` so one tree is never scanned twice — so candidates
+    /// carry the *resolved* path. Someone protecting a directory writes the
+    /// spelling they actually use, and a protection that silently fails to
+    /// apply is worse than one that was never offered.
+    #[test]
+    #[cfg(unix)]
+    fn ignores_a_path_written_the_way_the_user_reaches_it() {
+        let root = std::env::temp_dir().join(format!("reap-ignore-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root.join("volume/precious");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("src");
+        std::os::unix::fs::symlink(root.join("volume"), &link).unwrap();
+
+        // Written as the user reaches it; found as the scanner resolved it.
+        let set = IgnoreSet::new(&[link.join("precious").to_string_lossy().into_owned()]);
+        let found = std::fs::canonicalize(&real).unwrap();
+
+        assert!(
+            set.matches_candidate(&candidate(
+                "x",
+                "g",
+                Some(&found.join("target").to_string_lossy())
+            )),
+            "an ignore written through a link must still protect what it names"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A worktree is removed by `git worktree remove`, not by unlinking a path,
+    /// so it never was an `Action::Remove` — but it is still a directory on
+    /// disk that someone can reasonably expect to protect by naming it. Its
+    /// label reads `repo: ~/work/wt`, so falling back to label matching does
+    /// not save it either.
+    ///
+    /// This is the highest-stakes action reap takes on the filesystem, which is
+    /// the worst possible place for a protection to quietly not apply.
+    #[test]
+    fn ignores_a_worktree_by_the_path_it_occupies() {
+        use crate::model::{Action, Candidate, Category};
+        let path = PathBuf::from("/work/repo/wt");
+        // Built from the worktree's own path, so the two cannot drift apart.
+        let set = IgnoreSet::new(&[path.to_string_lossy().into_owned()]);
+        let cand = Candidate::new(
+            Category::Git,
+            "stale worktrees",
+            "repo: /work/repo/wt",
+            "",
+            0,
+            Risk::Safe,
+            Action::GitWorktreeRemove {
+                repo: PathBuf::from("/work/repo"),
+                path,
+                expected_head: String::new(),
+                expected_status: String::new(),
+                require_surviving_ref: false,
+                force: false,
+            },
+        );
+
+        assert!(
+            set.matches_candidate(&cand),
+            "a worktree must be protectable by the path it occupies"
+        );
     }
 
     #[test]
