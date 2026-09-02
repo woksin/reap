@@ -12,6 +12,24 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The header's three numbers now describe one set.** The reclaimable total,
+  the risk split, and the per-tier counts were computed over three different
+  predicates: two keyed on eligibility alone, one on whether a row can actually
+  be selected. A row that is reclaimable but carries no action returns no disk
+  if you take it, so counting its bytes promised space no keystroke could
+  deliver — and `ui.rs` would hide a tier for having no items while still
+  having sized it. All three now key on the same predicate, and a test asserts
+  the split sums to the total. Nothing observable changes today, because every
+  scanner that builds an actionless row states an eligibility explicitly.
+- **The bad state is no longer constructible.** `Candidate::new` defaulted to
+  `Reclaimable` whatever the action, so the above was one forgotten
+  `with_eligibility` away from returning. A row with nothing to run now defaults
+  to `Protected`, which is what "nothing can take this" means; an explicit
+  eligibility still overrides it, so live Docker images and locked worktrees are
+  unaffected.
+
 ### Added
 
 - **What an uninstalled application left behind is named as such.** The cache

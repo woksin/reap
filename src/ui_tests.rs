@@ -212,6 +212,78 @@ fn recent_and_reclaimable_state_totals_partition_nested_bytes() {
     assert_eq!(app.recent_size(), 60);
 }
 
+/// The header states one total and then splits it three ways. If the split is
+/// computed over a different set than the total, the three numbers stop adding
+/// up and the headline figure promises bytes the tiers never account for.
+///
+/// The trap is real rather than hypothetical: `Candidate::new` defaults to
+/// `Reclaimable`, so a row added later with no action inherits an eligibility
+/// saying "available" while nothing can take it. Keying all three on
+/// `selectable` is what keeps them describing one set.
+#[test]
+fn the_risk_split_accounts_for_every_reclaimable_byte() {
+    let mut app = fixture();
+    app.items = vec![
+        Candidate::new(
+            Category::Caches,
+            "packages",
+            "an ordinary cache",
+            "",
+            100,
+            Risk::Safe,
+            Action::Remove(PathBuf::from("/cache")),
+        ),
+        Candidate::new(
+            Category::Git,
+            "branches",
+            "something costlier",
+            "",
+            40,
+            Risk::Caution,
+            Action::Remove(PathBuf::from("/repo/build")),
+        ),
+        // Reclaimable by eligibility, but nothing can act on it. Taking it
+        // returns no disk, so it must not be promised as reclaimable.
+        Candidate::new(
+            Category::Git,
+            "stashes",
+            "visible but not actionable",
+            "",
+            999,
+            Risk::Danger,
+            Action::None,
+        ),
+    ];
+    app.rebuild();
+
+    let split: u64 = [Risk::Safe, Risk::Caution, Risk::Danger]
+        .into_iter()
+        .map(|risk| app.risk_size(risk))
+        .sum();
+    assert_eq!(
+        split,
+        app.total_size(),
+        "the risk tiers must account for exactly the reclaimable total"
+    );
+    assert_eq!(
+        app.total_size(),
+        140,
+        "the unactionable row promises nothing"
+    );
+
+    // A tier the header hides for having no items must contribute no bytes
+    // either, or the split silently loses them.
+    for risk in [Risk::Safe, Risk::Caution, Risk::Danger] {
+        if app.risk_count(risk) == 0 {
+            assert_eq!(
+                app.risk_size(risk),
+                0,
+                "{risk:?} has no selectable rows, so it must show no bytes"
+            );
+        }
+    }
+}
+
 #[test]
 fn reclaimable_parent_and_recent_child_are_also_partitioned_once() {
     let mut app = fixture();
