@@ -12,6 +12,21 @@ on each tag are the generated list of pull requests.
 
 ## [Unreleased]
 
+### Added
+
+- **reap keeps a cache whose owner is running, and says which one.** A few
+  caches are not merely rebuildable but live: removing a package manager's store
+  while it is resolving corrupts an operation already in flight rather than
+  costing a re-download, and the failure surfaces inside the other tool a long
+  way from the thing that caused it. Cache rules gained an `owner` list naming
+  the programs that mean this, populated for the package-manager stores, the Go
+  and Cargo caches, and Xcode's DerivedData. The check is tri-state and fails
+  closed: an unreadable process table is a claim about reap rather than about
+  the machine, so it keeps the cache and says so. reap's own process tree is
+  excluded, so a tool reap itself spawned cannot make it block on itself.
+  Browsers deliberately name no owner — a render cache is genuinely disposable.
+  (#11)
+
 ### Changed
 
 - **reap now refuses paths it previously agreed to delete.** Two of the fixes

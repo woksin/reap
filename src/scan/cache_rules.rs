@@ -845,6 +845,63 @@ const BUILTIN: &[BuiltinCache] = &[
     ),
 ];
 
+/// Caches that are *live*, and the programs that make them so.
+///
+/// Kept apart from `BUILTIN` rather than added as a seventh column, because
+/// this is a policy worth reading end to end: it is the complete list of places
+/// where reap will refuse rather than proceed, and a reviewer should be able to
+/// see all of it at once.
+///
+/// The bar for an entry is not "a program uses this". It is that deleting the
+/// path underneath a running one **corrupts an operation in flight** instead of
+/// merely costing a re-download. A package manager's content-addressed store
+/// qualifies; a browser's render cache does not, which is why the browsers are
+/// absent even though they are running far more often.
+///
+/// Keyed by path because that is already unique across the rule set — see
+/// `no_two_rules_name_the_same_path`.
+const OWNERS: &[(&str, &[&str])] = &[
+    // Package managers writing content-addressed stores. A half-written entry
+    // is indistinguishable from a good one on the next read.
+    ("~/.npm/_cacache", &["npm"]),
+    ("%LOCALAPPDATA%/npm-cache", &["npm"]),
+    ("~/Library/pnpm/store", &["pnpm"]),
+    ("~/.local/share/pnpm/store", &["pnpm"]),
+    ("~/.cache/pnpm", &["pnpm"]),
+    ("~/Library/Caches/Yarn", &["yarn"]),
+    ("~/.cache/yarn", &["yarn"]),
+    ("~/.yarn/berry/cache", &["yarn"]),
+    ("~/.bun/install/cache", &["bun"]),
+    ("~/.nuget/packages", &["dotnet", "nuget", "msbuild"]),
+    ("~/.m2/repository", &["mvn", "java"]),
+    ("~/.gradle/caches", &["gradle", "java"]),
+    // Cargo takes a lock over these; removing one mid-build fails the build.
+    ("~/.cargo/registry/cache", &["cargo"]),
+    ("~/.cargo/registry/src", &["cargo"]),
+    ("~/.cargo/git/checkouts", &["cargo"]),
+    ("~/go/pkg/mod", &["go"]),
+    ("~/Library/Caches/go-build", &["go"]),
+    ("~/.cache/go-build", &["go"]),
+    ("~/.cache/uv", &["uv"]),
+    ("~/.cache/pip", &["pip", "pip3"]),
+    ("~/Library/Caches/pip", &["pip", "pip3"]),
+    // Xcode rebuilds DerivedData, but not while it is mid-build: the failure
+    // lands as a stale-module error a long way from the cause.
+    (
+        "~/Library/Developer/Xcode/DerivedData",
+        &["Xcode", "xcodebuild", "swift-frontend"],
+    ),
+];
+
+/// The owners declared for a built-in rule, if it has any.
+fn owners_for(path: &str) -> Vec<String> {
+    OWNERS
+        .iter()
+        .find(|(candidate, _)| *candidate == path)
+        .map(|(_, owners)| owners.iter().map(|o| (*o).to_string()).collect())
+        .unwrap_or_default()
+}
+
 pub fn builtin_rules() -> Vec<CacheRule> {
     BUILTIN
         .iter()
@@ -855,6 +912,7 @@ pub fn builtin_rules() -> Vec<CacheRule> {
             detail: (*detail).to_string(),
             risk: *risk,
             prune: prune.iter().map(|a| (*a).to_string()).collect(),
+            owner: owners_for(path),
         })
         .collect()
 }

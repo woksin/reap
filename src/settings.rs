@@ -746,6 +746,10 @@ fn new_cache_rule(path: &str) -> CacheRule {
         // about should not be swept up by a recipe that takes everything safe.
         risk: RiskName::Rebuildable,
         prune: Vec::new(),
+        // A hand-added rule makes no liveness claim. Naming an owner is a
+        // statement about how a tool behaves, which only the person who knows
+        // that tool can make; it is available in the config file.
+        owner: Vec::new(),
     }
 }
 
@@ -883,6 +887,7 @@ mod tests {
             detail: String::new(),
             risk: RiskName::Safe,
             prune: prune.iter().map(|s| (*s).to_string()).collect(),
+            owner: Vec::new(),
         }
     }
 

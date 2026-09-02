@@ -558,6 +558,7 @@ fn settings_fixture() -> App {
         detail: String::new(),
         risk: RiskName::Rebuildable,
         prune: vec![],
+        owner: vec![],
     });
     app.config.artifacts.push(ArtifactRule {
         dir: "my-output".into(),

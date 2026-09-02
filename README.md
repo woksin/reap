@@ -546,6 +546,14 @@ Beyond that:
   reap refuses to risk deleting a different stash after concurrent activity.
 - Overlapping selections are removed **shallowest-first**, and anything already taken by a
   parent is skipped rather than counted twice.
+- A cache whose **owner is running** is kept, and says which one. A few caches are not
+  merely rebuildable but *live*: removing a package manager's store mid-resolve corrupts
+  an operation already in flight instead of costing a re-download, and the failure
+  surfaces inside the other tool a long way from the cause. `owner` on a rule names the
+  programs that mean this. **Not knowing is not idle** — if the process table cannot be
+  read, reap keeps the cache and says that is why, the same way an unreadable Docker size
+  is reported as unknown rather than as zero. Most rules name no owner; browsers
+  deliberately do not, since a render cache is genuinely disposable.
 - A **locked** git worktree is never offered.
 - `esc` does not quit. Leaving a tool that deletes files should take a specific keystroke.
 
@@ -681,6 +689,7 @@ label = "my-tool cache"
 detail = "re-downloaded on next run"
 risk = "safe"
 prune = ["my-tool", "cache", "clean"]   # run this instead of deleting
+owner = ["my-tool"]                     # keep it while this is running
 ```
 
 `evidence` is what keeps the artifact rules honest — without it, any directory sharing the

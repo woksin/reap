@@ -158,6 +158,7 @@ pub fn scan(opts: &ScanOpts, tx: &Sender<ScanEvent>) {
                 action,
             )
             .with_age(age)
+            .with_owner(rule.owner.clone())
             .with_footprint(path.clone());
             super::emit(tx, opts, cand);
         });
