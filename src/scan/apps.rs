@@ -166,6 +166,139 @@ mod inventory {
         // the tool that reads them is missing or refusing.
         if ids.is_empty() { None } else { Some(ids) }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("reap-apps-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        /// Write an app bundle declaring `id`, shaped the way a real one is.
+        fn an_app(root: &Path, rel: &str, id: &str) -> PathBuf {
+            let app = root.join(rel);
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(
+                app.join("Contents/Info.plist"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                     <plist version=\"1.0\"><dict>\n\
+                     <key>CFBundleIdentifier</key><string>{id}</string>\n\
+                     </dict></plist>"
+                ),
+            )
+            .unwrap();
+            app
+        }
+
+        /// Setapp and the Homebrew Caskroom nest a bundle several levels down,
+        /// which is why those roots get a deeper walk. Neither is on every Mac,
+        /// so this builds the shape rather than waiting to meet one.
+        #[test]
+        fn a_bundle_is_found_at_the_top_level_and_nested_in_a_cask() {
+            let root = scratch("nested");
+            an_app(&root, "Top.app", "com.example.top");
+            an_app(&root, "some-cask/1.2.3/Deep.app", "com.example.deep");
+
+            let mut found = Vec::new();
+            collect_bundles(&root, 3, &mut found);
+            // Sort the names, not the paths: `Top.app` sorts before
+            // `some-cask/…` by path, which says nothing about what was found.
+            let mut names: Vec<_> = found
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, vec!["Deep.app", "Top.app"]);
+
+            std::fs::remove_dir_all(&root).ok();
+        }
+
+        /// A bundle is a leaf. Helper applications live inside real ones, and
+        /// walking into them would inventory a helper as separately installed.
+        #[test]
+        fn the_walk_does_not_descend_into_a_bundle() {
+            let root = scratch("leaf");
+            an_app(&root, "Outer.app", "com.example.outer");
+            an_app(
+                &root,
+                "Outer.app/Contents/Helpers/Inner.app",
+                "com.example.inner",
+            );
+
+            let mut found = Vec::new();
+            collect_bundles(&root, 5, &mut found);
+            assert_eq!(found.len(), 1, "found: {found:?}");
+            assert!(found[0].ends_with("Outer.app"));
+
+            std::fs::remove_dir_all(&root).ok();
+        }
+
+        /// An aliased Applications folder would otherwise be walked twice, and
+        /// a link pointing back up the tree would not terminate at all.
+        #[test]
+        fn a_linked_directory_is_not_followed() {
+            let root = scratch("linked");
+            let real = root.join("real");
+            an_app(&real, "Linked.app", "com.example.linked");
+            std::os::unix::fs::symlink(&real, root.join("alias")).unwrap();
+
+            let mut found = Vec::new();
+            collect_bundles(&root, 3, &mut found);
+            assert_eq!(found.len(), 1, "the alias must not yield a second copy");
+
+            std::fs::remove_dir_all(&root).ok();
+        }
+
+        #[test]
+        fn the_declared_identifier_is_read_from_a_real_bundle() {
+            let root = scratch("ids");
+            let app = an_app(&root, "Thing.app", "com.example.Thing");
+            assert_eq!(ids_for(&app), vec!["com.example.thing".to_string()]);
+            std::fs::remove_dir_all(&root).ok();
+        }
+
+        /// An embedded privileged helper registers its own identifier as a file
+        /// name. Missing those is what made mole report the Adobe helpers as
+        /// unowned while Acrobat was installed.
+        #[test]
+        fn an_embedded_helper_contributes_its_own_identifier() {
+            let root = scratch("helpers");
+            let app = an_app(&root, "Parent.app", "com.example.parent");
+            let services = app.join("Contents/Library/LaunchServices");
+            std::fs::create_dir_all(&services).unwrap();
+            std::fs::write(services.join("com.example.parent.helper"), b"").unwrap();
+            // Not an identifier, so it must not enter the inventory.
+            std::fs::write(services.join("README"), b"").unwrap();
+
+            let mut ids = ids_for(&app);
+            ids.sort();
+            assert_eq!(
+                ids,
+                vec![
+                    "com.example.parent".to_string(),
+                    "com.example.parent.helper".to_string()
+                ]
+            );
+            std::fs::remove_dir_all(&root).ok();
+        }
+
+        /// A bundle whose plist cannot be read contributes nothing rather than
+        /// something wrong. It is skipped, never guessed at.
+        #[test]
+        fn a_bundle_without_a_readable_plist_contributes_nothing() {
+            let root = scratch("unreadable");
+            let app = root.join("Broken.app");
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(app.join("Contents/Info.plist"), b"not a plist at all").unwrap();
+            assert!(ids_for(&app).is_empty());
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
