@@ -124,7 +124,31 @@ pub fn asset_name() -> String {
 
 /// Work out how this binary was installed, from where it lives.
 pub fn detect() -> Strategy {
-    std::env::current_exe().map_or(Strategy::Manual, |p| strategy_for(&p))
+    let Ok(exe) = std::env::current_exe() else {
+        return Strategy::Manual;
+    };
+    strategy_for_installed(&exe, std::fs::canonicalize(&exe).ok().as_deref())
+}
+
+/// The strategy for a binary sitting at `exe`, whose real file is `resolved`.
+///
+/// `current_exe` reports the path the binary was reached by, symlinks and all.
+/// That matters on an Intel Mac, where Homebrew's prefix *is* `/usr/local`: the
+/// real file lives in `/usr/local/Cellar/…` and `/usr/local/bin/reap` is a link
+/// to it. Classifying the link alone finds no Homebrew marker and calls it a
+/// manual install — which then tells someone to `sudo mv` a plain binary over
+/// the link, orphaning the Cellar copy and leaving brew's manifest claiming a
+/// file it no longer owns.
+///
+/// Resolution is only consulted when the literal path says nothing, so it can
+/// add a recognised owner and never take one away. That also keeps the genuine
+/// manual install at `/usr/local/bin/reap` — the location the install script
+/// uses — correctly manual: a real file resolves to itself.
+pub fn strategy_for_installed(exe: &Path, resolved: Option<&Path>) -> Strategy {
+    match strategy_for(exe) {
+        Strategy::Manual => resolved.map_or(Strategy::Manual, strategy_for),
+        known => known,
+    }
 }
 
 /// Split out so the decision can be specified without moving the binary.
@@ -310,6 +334,74 @@ mod tests {
             strategy_for(&PathBuf::from("/home/linuxbrew/.linuxbrew/bin/reap")),
             Strategy::Homebrew
         );
+    }
+
+    /// Homebrew's prefix on an Intel Mac *is* `/usr/local`, so the link on
+    /// someone's PATH looks exactly like the manual install location. Only the
+    /// file it points at can tell them apart.
+    #[test]
+    fn a_homebrew_link_that_looks_manual_is_recognised_by_what_it_points_at() {
+        let link = PathBuf::from("/usr/local/bin/reap");
+        let real = PathBuf::from("/usr/local/Cellar/reap/1.0.0/bin/reap");
+        assert_eq!(
+            strategy_for(&link),
+            Strategy::Manual,
+            "the link alone is indistinguishable from a manual install"
+        );
+        assert_eq!(
+            strategy_for_installed(&link, Some(&real)),
+            Strategy::Homebrew
+        );
+    }
+
+    /// And the genuine manual install at the same path stays manual: a real
+    /// file resolves to itself, so nothing is guessed on its behalf.
+    #[test]
+    fn a_real_file_at_the_manual_location_stays_manual() {
+        let path = PathBuf::from("/usr/local/bin/reap");
+        assert_eq!(strategy_for_installed(&path, Some(&path)), Strategy::Manual);
+        assert_eq!(strategy_for_installed(&path, None), Strategy::Manual);
+    }
+
+    /// Resolution may add an owner and must never remove one, or a working
+    /// Homebrew installation could be downgraded to "do it yourself" by a
+    /// prefix that happens not to resolve.
+    #[test]
+    fn resolution_never_takes_away_an_owner_the_literal_path_established() {
+        let brew = PathBuf::from("/opt/homebrew/bin/reap");
+        let elsewhere = PathBuf::from("/tmp/somewhere/reap");
+        assert_eq!(
+            strategy_for_installed(&brew, Some(&elsewhere)),
+            Strategy::Homebrew
+        );
+        assert_eq!(strategy_for_installed(&brew, None), Strategy::Homebrew);
+    }
+
+    /// The same thing against a real link on disk, so this is specified
+    /// against the filesystem rather than against an assumption about it.
+    #[test]
+    #[cfg(unix)]
+    fn the_link_is_followed_on_a_real_filesystem() {
+        let root = std::env::temp_dir().join(format!("reap-update-{}", std::process::id()));
+        let cellar = root.join("Cellar/reap/1.0.0/bin");
+        std::fs::create_dir_all(&cellar).unwrap();
+        let real = cellar.join("reap");
+        std::fs::write(&real, b"binary").unwrap();
+
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("reap");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // What `current_exe` would hand us, and what it really is.
+        assert_eq!(strategy_for(&link), Strategy::Manual);
+        let resolved = std::fs::canonicalize(&link).unwrap();
+        assert_eq!(
+            strategy_for_installed(&link, Some(&resolved)),
+            Strategy::Homebrew
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
