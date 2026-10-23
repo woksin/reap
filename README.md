@@ -9,9 +9,10 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#platforms)
 [![CI](https://github.com/woksin/reap/actions/workflows/ci.yml/badge.svg)](https://github.com/woksin/reap/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/woksin/reap?color=86efac)](https://github.com/woksin/reap/releases/latest)
-[![License](https://img.shields.io/badge/license-MIT-green)](#license)
+[![Homebrew](https://img.shields.io/badge/homebrew-woksin%2Freap-fbb040?logo=homebrew&logoColor=white)](https://github.com/woksin/homebrew-reap)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Find and assess common stale developer and application data — then prune only what you can afford to lose.**
+**Find the stale developer junk on your machine — branches, worktrees, build artifacts, Docker, caches — and prune only what you can afford to lose.**
 
 <br>
 
@@ -146,6 +147,14 @@ thread, gives up after five seconds and remembers the answer for a day, so it is
 the reason reap feels slow — and it stays quiet when there is no terminal to read it,
 so it cannot end up in a cron log or in `--json`. `REAP_NO_UPDATE_CHECK=1` turns it off
 entirely.
+
+## Quick start
+
+```bash
+reap --list    # see what it finds and how risky each item is; changes nothing
+reap           # open the interface, pick, and reap
+reap guide     # the walkthrough, in your terminal
+```
 
 ## Use
 
@@ -957,6 +966,10 @@ with none of those labels releases nothing.
 
 See [CHANGELOG.md](CHANGELOG.md).
 
+## Related projects
+
+- [homebrew-reap](https://github.com/woksin/homebrew-reap) — the Homebrew tap that installs reap.
+
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Sindre Wilting
